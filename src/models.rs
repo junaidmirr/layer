@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolKind {
@@ -114,7 +114,7 @@ pub struct ImpactRadius {
     pub callees: Vec<String>,       // Functions or methods called
     pub callees_confidence: String, // "approximate"
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,    // If symbol has multiple declarations
+    pub candidates: Vec<String>, // If symbol has multiple declarations
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,8 +170,12 @@ impl std::fmt::Display for FileOperation {
             FileOperation::Created => write!(f, "CREATED"),
             FileOperation::Modified => write!(f, "MODIFIED"),
             FileOperation::Deleted => write!(f, "DELETED"),
-            FileOperation::Moved { from, to } => write!(f, "MOVED ({} -> {})", from.display(), to.display()),
-            FileOperation::Copied { from, to } => write!(f, "COPIED ({} -> {})", from.display(), to.display()),
+            FileOperation::Moved { from, to } => {
+                write!(f, "MOVED ({} -> {})", from.display(), to.display())
+            }
+            FileOperation::Copied { from, to } => {
+                write!(f, "COPIED ({} -> {})", from.display(), to.display())
+            }
         }
     }
 }

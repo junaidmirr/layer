@@ -27,10 +27,10 @@ impl CodebaseScanner {
 
         for entry in walker.filter_map(Result::ok) {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(file_node) = self.scan_file(path) {
-                    results.push(file_node);
-                }
+            if path.is_file()
+                && let Some(file_node) = self.scan_file(path)
+            {
+                results.push(file_node);
             }
         }
 
@@ -94,10 +94,8 @@ impl CodebaseScanner {
 
 fn is_likely_binary_or_asset(path: &Path) -> bool {
     let binary_extensions = [
-        "png", "jpg", "jpeg", "gif", "ico", "svg", "webp", "pdf",
-        "zip", "tar", "gz", "bz2", "7z", "rar",
-        "exe", "dll", "so", "dylib", "bin", "o", "a",
-        "wasm", "pyc", "class", "lock",
+        "png", "jpg", "jpeg", "gif", "ico", "svg", "webp", "pdf", "zip", "tar", "gz", "bz2", "7z",
+        "rar", "exe", "dll", "so", "dylib", "bin", "o", "a", "wasm", "pyc", "class", "lock",
     ];
 
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -110,7 +108,11 @@ fn is_likely_binary_or_asset(path: &Path) -> bool {
     // Ignore .git, target/, node_modules/ in path components
     for component in path.components() {
         let comp_str = component.as_os_str().to_string_lossy();
-        if comp_str == ".git" || comp_str == "target" || comp_str == "node_modules" || comp_str == ".gemini" {
+        if comp_str == ".git"
+            || comp_str == "target"
+            || comp_str == "node_modules"
+            || comp_str == ".gemini"
+        {
             return true;
         }
     }

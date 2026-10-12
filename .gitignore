@@ -1,1 +1,18 @@
+# Rust build artifacts
 /target
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Editor configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and environment
+*.log
+.env
+.env.*
+!.env.example

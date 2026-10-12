@@ -169,7 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph_arc = Arc::new(Mutex::new(vector_graph));
 
     // Start background watcher for persistent modes (MCP, REPL, Watch)
-    let is_persistent = is_mcp || matches!(cli.command, Some(Commands::Repl) | Some(Commands::Watch));
+    let is_persistent =
+        is_mcp || matches!(cli.command, Some(Commands::Repl) | Some(Commands::Watch));
     if is_persistent {
         let watcher = CodeWatcher::new(root.clone(), Arc::clone(&graph_arc));
         let _watcher_thread = watcher.start_in_background();
@@ -181,7 +182,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Skeleton { file_path }) => {
             let g = graph_arc.lock().unwrap();
-            let path_match = g.find_file_match(&file_path).unwrap_or_else(|| PathBuf::from(&file_path));
+            let path_match = g
+                .find_file_match(&file_path)
+                .unwrap_or_else(|| PathBuf::from(&file_path));
             match g.get_file_skeleton(&path_match) {
                 Some(sk) => {
                     if cli.json {
@@ -200,7 +203,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("    {}", s.signature);
                         }
                         let json_str = serde_json::to_string(&sk).unwrap_or_default();
-                        println!("Token footprint: {} bytes (~{} tokens)", json_str.len(), (json_str.len() + 3) / 4);
+                        println!(
+                            "Token footprint: {} bytes (~{} tokens)",
+                            json_str.len(),
+                            json_str.len().div_ceil(4)
+                        );
                     }
                 }
                 None => {
@@ -217,7 +224,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("References to '{}' ({} found):", symbol, refs.len());
                 for r in refs {
-                    let caller_info = r.caller_symbol.map(|c| format!(" (in {})", c)).unwrap_or_default();
+                    let caller_info = r
+                        .caller_symbol
+                        .map(|c| format!(" (in {})", c))
+                        .unwrap_or_default();
                     println!("  {}:{}{} -> {}", r.file, r.line, caller_info, r.text);
                 }
             }
@@ -230,7 +240,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Callers of '{}' ({} found):", symbol, callers.len());
                 for c in callers {
-                    println!("  {} [L{}-L{}] in {}:", c.caller_symbol, c.caller_lines[0], c.caller_lines[1], c.caller_file);
+                    println!(
+                        "  {} [L{}-L{}] in {}:",
+                        c.caller_symbol, c.caller_lines[0], c.caller_lines[1], c.caller_file
+                    );
                     println!("    Line {}: {}", c.call_line, c.call_snippet);
                 }
             }
@@ -256,7 +269,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Declarations of '{}' ({} found):", name, hits.len());
                 for (path, s) in hits {
-                    println!("  {} [L{}-L{}] in {}", s.kind, s.start_line, s.end_line, path.display());
+                    println!(
+                        "  {} [L{}-L{}] in {}",
+                        s.kind,
+                        s.start_line,
+                        s.end_line,
+                        path.display()
+                    );
                     println!("    {}", s.signature);
                 }
             }
@@ -269,7 +288,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if cli.json {
                         println!("{}", serde_json::to_string_pretty(&body)?);
                     } else {
-                        println!("Symbol: {} (in {}) L{}-L{}:", body.symbol_name, body.file, body.lines[0], body.lines[1]);
+                        println!(
+                            "Symbol: {} (in {}) L{}-L{}:",
+                            body.symbol_name, body.file, body.lines[0], body.lines[1]
+                        );
                         println!("Signature: {}", body.signature);
                         if !body.candidates.is_empty() {
                             println!("Alternative candidates ({}):", body.candidates.len());
@@ -281,7 +303,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("[Note: Output body was truncated to save tokens]");
                         }
                         let json_str = serde_json::to_string(&body).unwrap_or_default();
-                        println!("Token footprint: {} bytes (~{} tokens)", json_str.len(), (json_str.len() + 3) / 4);
+                        println!(
+                            "Token footprint: {} bytes (~{} tokens)",
+                            json_str.len(),
+                            json_str.len().div_ceil(4)
+                        );
                         println!("----------------------------------------");
                         println!("{}", body.body);
                     }
@@ -306,11 +332,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ref sig) = impact.signature {
                     println!("  Signature:  {}", sig);
                 }
-                println!("  Confidence: callers={}, callees={}", impact.callers_confidence, impact.callees_confidence);
-                println!("  Callers ({}/{} shown{}):", impact.callers.len(), impact.total_callers, if impact.callers_truncated { ", capped at 10" } else { "" });
+                println!(
+                    "  Confidence: callers={}, callees={}",
+                    impact.callers_confidence, impact.callees_confidence
+                );
+                println!(
+                    "  Callers ({}/{} shown{}):",
+                    impact.callers.len(),
+                    impact.total_callers,
+                    if impact.callers_truncated {
+                        ", capped at 10"
+                    } else {
+                        ""
+                    }
+                );
                 for c in &impact.callers {
                     let approx = if c.is_approximate { " (~approx)" } else { "" };
-                    println!("    ↳ {} in {}:{}{}", c.caller_symbol, c.caller_file, c.call_line, approx);
+                    println!(
+                        "    ↳ {} in {}:{}{}",
+                        c.caller_symbol, c.caller_file, c.call_line, approx
+                    );
                 }
                 println!("  Callees ({}):", impact.callees.len());
                 for c in &impact.callees {
@@ -323,7 +364,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 let json_str = serde_json::to_string(&impact).unwrap_or_default();
-                println!("  Token footprint: {} bytes (~{} tokens)", json_str.len(), (json_str.len() + 3) / 4);
+                println!(
+                    "  Token footprint: {} bytes (~{} tokens)",
+                    json_str.len(),
+                    json_str.len().div_ceil(4)
+                );
             }
         }
         Some(Commands::Tree) => {
@@ -332,13 +377,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let list: Vec<_> = g
                     .list_files()
                     .iter()
-                    .filter_map(|p| g.files.get(p).map(|node| {
-                        json!({
-                            "path": p.display().to_string(),
-                            "lines": node.line_count,
-                            "symbols": node.symbols.len()
+                    .filter_map(|p| {
+                        g.files.get(p).map(|node| {
+                            json!({
+                                "path": p.display().to_string(),
+                                "lines": node.line_count,
+                                "symbols": node.symbols.len()
+                            })
                         })
-                    }))
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&list)?);
             } else {
@@ -347,11 +394,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::File { file_path }) => {
             let g = graph_arc.lock().unwrap();
-            let path_match = g.find_file_match(&file_path).unwrap_or_else(|| PathBuf::from(&file_path));
+            let path_match = g
+                .find_file_match(&file_path)
+                .unwrap_or_else(|| PathBuf::from(&file_path));
             match g.get_file_content(&path_match) {
                 Some(content) => {
                     if cli.json {
-                        println!("{}", serde_json::to_string_pretty(&json!({ "path": path_match.display().to_string(), "content": content }))?);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &json!({ "path": path_match.display().to_string(), "content": content })
+                            )?
+                        );
                     } else {
                         for (idx, line) in content.lines().enumerate() {
                             println!("{:4} | {}", idx + 1, line);
@@ -366,14 +420,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Symbols { file_path }) => {
             let g = graph_arc.lock().unwrap();
-            let path_match = g.find_file_match(&file_path).unwrap_or_else(|| PathBuf::from(&file_path));
+            let path_match = g
+                .find_file_match(&file_path)
+                .unwrap_or_else(|| PathBuf::from(&file_path));
             match g.get_file_symbols(&path_match) {
                 Some(syms) => {
                     if cli.json {
                         println!("{}", serde_json::to_string_pretty(&syms)?);
                     } else {
                         for s in syms {
-                            println!("• [{}] {} (L{}-L{}) - {}", s.kind, s.name, s.start_line, s.end_line, s.signature);
+                            println!(
+                                "• [{}] {} (L{}-L{}) - {}",
+                                s.kind, s.name, s.start_line, s.end_line, s.signature
+                            );
                         }
                     }
                 }
@@ -383,13 +442,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Some(Commands::Lines { file_path, start, end }) => {
+        Some(Commands::Lines {
+            file_path,
+            start,
+            end,
+        }) => {
             let g = graph_arc.lock().unwrap();
-            let path_match = g.find_file_match(&file_path).unwrap_or_else(|| PathBuf::from(&file_path));
+            let path_match = g
+                .find_file_match(&file_path)
+                .unwrap_or_else(|| PathBuf::from(&file_path));
             match g.get_file_lines(&path_match, start, end) {
                 Some(slice) => {
                     if cli.json {
-                        println!("{}", serde_json::to_string_pretty(&json!({ "path": path_match.display().to_string(), "start": start, "end": end, "lines": slice }))?);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &json!({ "path": path_match.display().to_string(), "start": start, "end": end, "lines": slice })
+                            )?
+                        );
                     } else {
                         print!("{}", slice);
                     }
@@ -484,9 +554,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_repl(graph: Arc<Mutex<VectorGraph>>) -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", "=======================================================".cyan());
-    println!("{}", "  Layer Context Engine REPL (Interactive Prompt)       ".bold());
-    println!("{}", "=======================================================".cyan());
+    println!(
+        "{}",
+        "=======================================================".cyan()
+    );
+    println!(
+        "{}",
+        "  Layer Context Engine REPL (Interactive Prompt)       ".bold()
+    );
+    println!(
+        "{}",
+        "=======================================================".cyan()
+    );
     println!("Type your prompts naturally. Examples:");
     println!("  • 'give me file structure'");
     println!("  • 'history' or 'what changed'");

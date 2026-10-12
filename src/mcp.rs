@@ -19,11 +19,18 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
             continue;
         }
 
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
-                let id = val.get("id").cloned();
-                handle_rpc_method(&graph, &mut root, method, id, val.get("params"), &mut writer)?;
-            }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && let Some(method) = val.get("method").and_then(|m| m.as_str())
+        {
+            let id = val.get("id").cloned();
+            handle_rpc_method(
+                &graph,
+                &mut root,
+                method,
+                id,
+                val.get("params"),
+                &mut writer,
+            )?;
         }
 
         line.clear();
@@ -44,15 +51,13 @@ fn handle_rpc_method(
         "initialize" => {
             // If the client supplies rootUri, rootPath, or workspaceFolders, update workspace root
             if let Some(p) = params {
-                let client_uri = p.get("rootUri")
-                    .and_then(|u| u.as_str())
-                    .or_else(|| {
-                        p.get("workspaceFolders")
-                            .and_then(|w| w.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|obj| obj.get("uri"))
-                            .and_then(|u| u.as_str())
-                    });
+                let client_uri = p.get("rootUri").and_then(|u| u.as_str()).or_else(|| {
+                    p.get("workspaceFolders")
+                        .and_then(|w| w.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|obj| obj.get("uri"))
+                        .and_then(|u| u.as_str())
+                });
 
                 if let Some(uri_str) = client_uri {
                     let cleaned_path = if let Some(stripped) = uri_str.strip_prefix("file://") {
@@ -62,7 +67,10 @@ fn handle_rpc_method(
                     };
                     let new_root = PathBuf::from(cleaned_path);
                     if new_root.exists() && new_root.is_dir() && new_root != *root {
-                        eprintln!("[layer-mcp] Switching workspace root to: {}", new_root.display());
+                        eprintln!(
+                            "[layer-mcp] Switching workspace root to: {}",
+                            new_root.display()
+                        );
                         *root = new_root.clone();
                         if let Ok(mut g) = graph.lock() {
                             g.clear();
@@ -72,7 +80,10 @@ fn handle_rpc_method(
                 } else if let Some(path_str) = p.get("rootPath").and_then(|u| u.as_str()) {
                     let new_root = PathBuf::from(path_str);
                     if new_root.exists() && new_root.is_dir() && new_root != *root {
-                        eprintln!("[layer-mcp] Switching workspace root to: {}", new_root.display());
+                        eprintln!(
+                            "[layer-mcp] Switching workspace root to: {}",
+                            new_root.display()
+                        );
                         *root = new_root.clone();
                         if let Ok(mut g) = graph.lock() {
                             g.clear();
@@ -280,14 +291,18 @@ fn handle_rpc_method(
             let content_text = execute_tool(&mut g, root, tool_name, arguments);
             let duration = start_time.elapsed();
             let byte_count = content_text.len();
-            let approx_tokens = (byte_count + 3) / 4;
+            let approx_tokens = byte_count.div_ceil(4);
 
             let log_line = format!(
                 "[layer-mcp] tool_call: '{}' completed in {:?} | size: {} bytes (~{} tokens)\n",
                 tool_name, duration, byte_count, approx_tokens
             );
             eprint!("{}", log_line);
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/layer_mcp.log") {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/layer_mcp.log")
+            {
                 let _ = f.write_all(log_line.as_bytes());
             }
 
@@ -362,7 +377,10 @@ fn resolve_safe_path(root: &Path, raw_path: &str) -> Result<PathBuf, String> {
     };
 
     if !canonical_target.starts_with(&canonical_root) {
-        return Err(format!("Error: Access denied. Path '{}' is outside workspace root.", raw_path));
+        return Err(format!(
+            "Error: Access denied. Path '{}' is outside workspace root.",
+            raw_path
+        ));
     }
 
     // Convert to relative path from workspace root
@@ -385,15 +403,15 @@ fn execute_tool(
     g.sync_workspace(root);
 
     // If an explicit path or file was supplied, check that specific file path immediately
-    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-        if let Ok(safe_rel) = resolve_safe_path(root, p) {
-            g.refresh_path_if_modified(root, &safe_rel);
-        }
+    if let Some(p) = args.get("path").and_then(|v| v.as_str())
+        && let Ok(safe_rel) = resolve_safe_path(root, p)
+    {
+        g.refresh_path_if_modified(root, &safe_rel);
     }
-    if let Some(f) = args.get("file").and_then(|v| v.as_str()) {
-        if let Ok(safe_rel) = resolve_safe_path(root, f) {
-            g.refresh_path_if_modified(root, &safe_rel);
-        }
+    if let Some(f) = args.get("file").and_then(|v| v.as_str())
+        && let Ok(safe_rel) = resolve_safe_path(root, f)
+    {
+        g.refresh_path_if_modified(root, &safe_rel);
     }
 
     match tool_name {
@@ -406,12 +424,18 @@ fn execute_tool(
 
             // Block sensitive files (.env, credentials)
             let file_name = safe_rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if file_name.to_lowercase().starts_with(".env") || file_name == ".git" || file_name.contains("id_rsa") || file_name.ends_with(".pem") {
+            if file_name.to_lowercase().starts_with(".env")
+                || file_name == ".git"
+                || file_name.contains("id_rsa")
+                || file_name.ends_with(".pem")
+            {
                 return format!("Error: Access denied. File '{}' is restricted.", path_str);
             }
 
             // Strictly serve only files indexed or within workspace
-            let path_match = g.find_file_match(&safe_rel.to_string_lossy()).unwrap_or(safe_rel);
+            let path_match = g
+                .find_file_match(&safe_rel.to_string_lossy())
+                .unwrap_or(safe_rel);
             match g.get_file_skeleton(&path_match) {
                 Some(skeleton) => serde_json::to_string(&skeleton).unwrap_or_default(),
                 None => format!("Error: File '{}' not found in workspace index.", path_str),
@@ -441,8 +465,15 @@ fn execute_tool(
         }
         "find_references" => {
             let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            let code_only = args.get("code_only").and_then(|c| c.as_bool()).unwrap_or(false);
-            let limit = args.get("limit").and_then(|l| l.as_u64()).map(|l| l as usize).unwrap_or(60);
+            let code_only = args
+                .get("code_only")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(false);
+            let limit = args
+                .get("limit")
+                .and_then(|l| l.as_u64())
+                .map(|l| l as usize)
+                .unwrap_or(60);
             let mut refs = g.find_references_filtered(symbol, code_only);
             if refs.is_empty() {
                 format!("No references found for symbol '{}'.", symbol)
@@ -457,7 +488,8 @@ fn execute_tool(
                         "returned": refs.len(),
                         "is_truncated": true,
                         "references": refs,
-                    }).to_string()
+                    })
+                    .to_string()
                 } else {
                     serde_json::to_string(&refs).unwrap_or_default()
                 }
@@ -465,7 +497,11 @@ fn execute_tool(
         }
         "get_callers" => {
             let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            let limit = args.get("limit").and_then(|l| l.as_u64()).map(|l| l as usize).unwrap_or(25);
+            let limit = args
+                .get("limit")
+                .and_then(|l| l.as_u64())
+                .map(|l| l as usize)
+                .unwrap_or(25);
             let callers = g.get_callers(symbol);
             if callers.is_empty() {
                 serde_json::to_string(&json!({
@@ -486,7 +522,8 @@ fn execute_tool(
                         "returned": list.len(),
                         "is_truncated": true,
                         "callers": list,
-                    }).to_string()
+                    })
+                    .to_string()
                 } else {
                     serde_json::to_string(&list).unwrap_or_default()
                 }
@@ -495,7 +532,10 @@ fn execute_tool(
         "get_lines" => {
             let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
             let start = args.get("start").and_then(|s| s.as_u64()).unwrap_or(1) as usize;
-            let end = args.get("end").and_then(|e| e.as_u64()).unwrap_or(start as u64) as usize;
+            let end = args
+                .get("end")
+                .and_then(|e| e.as_u64())
+                .unwrap_or(start as u64) as usize;
 
             let safe_rel = match resolve_safe_path(root, path_str) {
                 Ok(p) => p,
@@ -509,9 +549,17 @@ fn execute_tool(
             };
 
             // Block sensitive files (.env*, credentials, keys, certificates)
-            let file_name = path_match.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let file_name = path_match
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
             let name_lower = file_name.to_lowercase();
-            if name_lower.contains(".env") || name_lower == ".git" || name_lower.contains("id_rsa") || name_lower.ends_with(".pem") || name_lower.ends_with(".key") {
+            if name_lower.contains(".env")
+                || name_lower == ".git"
+                || name_lower.contains("id_rsa")
+                || name_lower.ends_with(".pem")
+                || name_lower.ends_with(".key")
+            {
                 return format!("Error: Access denied. File '{}' is restricted.", path_str);
             }
 
@@ -551,12 +599,10 @@ fn execute_tool(
         }
         "get_symbol_body" => {
             let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let file_hint = args.get("file").and_then(|f| f.as_str()).and_then(|f_str| {
-                match resolve_safe_path(root, f_str) {
-                    Ok(p) => Some(p),
-                    Err(_) => None,
-                }
-            });
+            let file_hint = args
+                .get("file")
+                .and_then(|f| f.as_str())
+                .and_then(|f_str| resolve_safe_path(root, f_str).ok());
             match g.get_symbol_body(name, file_hint.as_deref()) {
                 Some(body) => serde_json::to_string(&body).unwrap_or_default(),
                 None => format!("Symbol '{}' not found in codebase.", name),
@@ -564,12 +610,10 @@ fn execute_tool(
         }
         "get_impact_radius" => {
             let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            let file_hint = args.get("file").and_then(|f| f.as_str()).and_then(|f_str| {
-                match resolve_safe_path(root, f_str) {
-                    Ok(p) => Some(p),
-                    Err(_) => None,
-                }
-            });
+            let file_hint = args
+                .get("file")
+                .and_then(|f| f.as_str())
+                .and_then(|f_str| resolve_safe_path(root, f_str).ok());
             let impact = g.get_impact_radius(symbol, file_hint.as_deref());
             serde_json::to_string(&impact).unwrap_or_default()
         }
@@ -618,7 +662,11 @@ mod tests {
         // 2. Directory traversal attempt
         let res_traversal = resolve_safe_path(&temp_dir, "../../etc/passwd");
         assert!(res_traversal.is_err(), "Traversal outside root must fail");
-        assert!(res_traversal.unwrap_err().contains("outside workspace root"));
+        assert!(
+            res_traversal
+                .unwrap_err()
+                .contains("outside workspace root")
+        );
 
         // 3. Absolute path outside root
         let res_outside = resolve_safe_path(&temp_dir, "/etc/passwd");
@@ -628,4 +676,3 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }
-

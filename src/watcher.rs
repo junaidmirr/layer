@@ -1,6 +1,6 @@
 use crate::graph::VectorGraph;
 use crate::walker::CodebaseScanner;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
@@ -28,8 +28,15 @@ impl CodeWatcher {
                 }
             };
 
-            if let Err(e) = debouncer.watcher().watch(&self.root_path, notify::RecursiveMode::Recursive) {
-                eprintln!("Failed to watch root directory {}: {}", self.root_path.display(), e);
+            if let Err(e) = debouncer
+                .watcher()
+                .watch(&self.root_path, notify::RecursiveMode::Recursive)
+            {
+                eprintln!(
+                    "Failed to watch root directory {}: {}",
+                    self.root_path.display(),
+                    e
+                );
                 return;
             }
 
@@ -59,11 +66,17 @@ impl CodeWatcher {
                                 if path.exists() && path.is_file() {
                                     if let Some(file_node) = scanner.scan_file(&path) {
                                         graph_lock.upsert_file(file_node);
-                                        eprintln!("\x1b[32m[Real-time Update]\x1b[0m Incremental re-indexed: {}", rel_path.display());
+                                        eprintln!(
+                                            "\x1b[32m[Real-time Update]\x1b[0m Incremental re-indexed: {}",
+                                            rel_path.display()
+                                        );
                                     }
                                 } else {
                                     graph_lock.remove_file(&rel_path);
-                                    eprintln!("\x1b[33m[Real-time Update]\x1b[0m Removed file from index: {}", rel_path.display());
+                                    eprintln!(
+                                        "\x1b[33m[Real-time Update]\x1b[0m Removed file from index: {}",
+                                        rel_path.display()
+                                    );
                                 }
                             }
                         }
@@ -80,7 +93,12 @@ impl CodeWatcher {
 fn should_ignore_change(path: &Path) -> bool {
     for comp in path.components() {
         let name = comp.as_os_str().to_string_lossy();
-        if name == "target" || name == ".git" || name == "node_modules" || name == "build" || name.starts_with('.') {
+        if name == "target"
+            || name == ".git"
+            || name == "node_modules"
+            || name == "build"
+            || name.starts_with('.')
+        {
             return true;
         }
     }

@@ -1,8 +1,8 @@
 use crate::embedder::VectorEmbedder;
 use crate::history::HistoryCache;
 use crate::models::{
-    CallerInfo, FileChunk, FileNode, FileSkeleton, ImpactRadius, SearchHit, Symbol, SymbolKind,
-    SymbolBodyResult, SymbolReference, SymbolSkeleton,
+    CallerInfo, FileChunk, FileNode, FileSkeleton, ImpactRadius, SearchHit, Symbol,
+    SymbolBodyResult, SymbolKind, SymbolReference, SymbolSkeleton,
 };
 use crate::walker::CodebaseScanner;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -61,14 +61,16 @@ impl VectorGraph {
         // Concurrency Guard: Reject older indexing reads from overwriting newer state
         if let Some(existing) = self.files.get(&path) {
             // If content hash is identical, skip re-indexing (no-op)
-            if existing.content_hash == file.content_hash && existing.size_bytes == file.size_bytes {
+            if existing.content_hash == file.content_hash && existing.size_bytes == file.size_bytes
+            {
                 return;
             }
 
-            if let (Some(incoming_mod), Some(existing_mod)) = (file.last_modified, existing.last_modified) {
-                if incoming_mod < existing_mod {
-                    return; // Stale timestamp write rejected
-                }
+            if let (Some(incoming_mod), Some(existing_mod)) =
+                (file.last_modified, existing.last_modified)
+                && incoming_mod < existing_mod
+            {
+                return; // Stale timestamp write rejected
             }
         }
 
@@ -122,7 +124,12 @@ impl VectorGraph {
         }
 
         // Also add whole-file chunk
-        let max_preview = lines.iter().take(50).cloned().collect::<Vec<_>>().join("\n");
+        let max_preview = lines
+            .iter()
+            .take(50)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
         self.chunks.push(FileChunk {
             id: format!("{}:file", path.display()),
             file_path: path.clone(),
@@ -181,13 +188,8 @@ impl VectorGraph {
             .unwrap_or_default();
 
         if let Some(content) = old_content {
-            self.history.record_change(
-                path,
-                Some(content),
-                None,
-                &old_symbols,
-                &[],
-            );
+            self.history
+                .record_change(path, Some(content), None, &old_symbols, &[]);
         }
 
         self.chunks.retain(|c| c.file_path != path);
@@ -221,7 +223,10 @@ impl VectorGraph {
                 let modified = meta.modified().ok();
                 let size = meta.len();
                 let needs_update = match self.files.get(&rel_path) {
-                    Some(existing) => existing.size_bytes != size || (modified.is_some() && existing.last_modified != modified),
+                    Some(existing) => {
+                        existing.size_bytes != size
+                            || (modified.is_some() && existing.last_modified != modified)
+                    }
                     None => true,
                 };
                 if needs_update {
@@ -242,7 +247,9 @@ impl VectorGraph {
 
     /// Refresh a file matching a query or filename if it has changed on disk
     pub fn refresh_if_stale(&mut self, root: &Path, partial_or_path: &str) -> bool {
-        let matched = self.find_file_match(partial_or_path).unwrap_or_else(|| PathBuf::from(partial_or_path));
+        let matched = self
+            .find_file_match(partial_or_path)
+            .unwrap_or_else(|| PathBuf::from(partial_or_path));
         self.refresh_path_if_modified(root, &matched)
     }
 
@@ -292,11 +299,12 @@ impl VectorGraph {
                     None => true,
                 };
 
-                if needs_update {
-                    if let Some(file_node) = scanner.scan_file(path) {
-                        eprintln!("[layer-sync] Discovered/updated file: {}", rel_path.display());
-                        self.upsert_file(file_node);
-                    }
+                if needs_update && let Some(file_node) = scanner.scan_file(path) {
+                    eprintln!(
+                        "[layer-sync] Discovered/updated file: {}",
+                        rel_path.display()
+                    );
+                    self.upsert_file(file_node);
                 }
             }
         }
@@ -337,7 +345,10 @@ impl VectorGraph {
                         continue;
                     }
                     let other_str = other_path.to_string_lossy();
-                    let stem = other_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let stem = other_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
                     if (!stem.is_empty() && import.contains(stem)) || import.contains(&*other_str) {
                         self.graph.update_edge(source_idx, target_idx, ());
                     }
@@ -393,7 +404,11 @@ impl VectorGraph {
             .collect();
 
         // Sort descending by score
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(limit);
         scored
     }
@@ -429,7 +444,10 @@ impl VectorGraph {
 
                 // If symbols exist, list first 3 preview
                 for sym in node.symbols.iter().take(3) {
-                    output.push_str(&format!("  │     ↳ [{}] {} (L{}-L{})\n", sym.kind, sym.name, sym.start_line, sym.end_line));
+                    output.push_str(&format!(
+                        "  │     ↳ [{}] {} (L{}-L{})\n",
+                        sym.kind, sym.name, sym.start_line, sym.end_line
+                    ));
                 }
                 if node.symbols.len() > 3 {
                     output.push_str(&format!("  │     ↳ ... +{} more\n", node.symbols.len() - 3));
@@ -450,7 +468,12 @@ impl VectorGraph {
     }
 
     /// Get slice of lines (1-indexed, inclusive) from a file
-    pub fn get_file_lines(&self, path: &Path, start_line: usize, end_line: usize) -> Option<String> {
+    pub fn get_file_lines(
+        &self,
+        path: &Path,
+        start_line: usize,
+        end_line: usize,
+    ) -> Option<String> {
         let node = self.files.get(path)?;
         let lines: Vec<&str> = node.content.lines().collect();
         if lines.is_empty() {
@@ -490,10 +513,10 @@ impl VectorGraph {
         }
         // Match filename directly
         for path in self.files.keys() {
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name.to_lowercase() == partial_lower {
-                    return Some(path.clone());
-                }
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                && file_name.to_lowercase() == partial_lower
+            {
+                return Some(path.clone());
             }
         }
         None
@@ -544,7 +567,11 @@ impl VectorGraph {
     }
 
     /// Find references with optional code-only filtering
-    pub fn find_references_filtered(&self, symbol_name: &str, code_only: bool) -> Vec<SymbolReference> {
+    pub fn find_references_filtered(
+        &self,
+        symbol_name: &str,
+        code_only: bool,
+    ) -> Vec<SymbolReference> {
         let mut references = Vec::new();
         if symbol_name.trim().is_empty() {
             return references;
@@ -575,7 +602,7 @@ impl VectorGraph {
                             && line_num <= s.end_line
                     });
 
-                    let is_def = caller.map_or(false, |c| {
+                    let is_def = caller.is_some_and(|c| {
                         let c_lower = c.name.to_lowercase();
                         (c_lower == sym_lower || c_lower.ends_with(&suffix))
                             && (c.start_line == line_num || c.signature.contains(symbol_name))
@@ -603,11 +630,14 @@ impl VectorGraph {
     /// Get all callers of a function or method across the codebase, grouped by enclosing symbol
     pub fn get_callers(&self, symbol_name: &str) -> Vec<CallerInfo> {
         let refs = self.find_references_filtered(symbol_name, true);
-        let mut grouped: std::collections::HashMap<(String, String), (CallerInfo, usize, bool)> = std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<(String, String), (CallerInfo, usize, bool)> =
+            std::collections::HashMap::new();
         let mut order: Vec<(String, String)> = Vec::new();
 
         for r in refs {
-            let caller_name = r.caller_symbol.unwrap_or_else(|| "<module-level>".to_string());
+            let caller_name = r
+                .caller_symbol
+                .unwrap_or_else(|| "<module-level>".to_string());
             let file = r.file;
             let key = (file.clone(), caller_name.clone());
 
@@ -655,7 +685,11 @@ impl VectorGraph {
     }
 
     /// Retrieve the exact code implementation of a symbol (function, method, struct)
-    pub fn get_symbol_body(&self, symbol_name: &str, file_hint: Option<&Path>) -> Option<SymbolBodyResult> {
+    pub fn get_symbol_body(
+        &self,
+        symbol_name: &str,
+        file_hint: Option<&Path>,
+    ) -> Option<SymbolBodyResult> {
         let matches = self.find_symbol(symbol_name);
         if matches.is_empty() {
             return None;
@@ -688,8 +722,10 @@ impl VectorGraph {
                 .filter(|(idx, _)| *idx != selected_idx)
                 .filter(|(_, (p, s))| {
                     if p == chosen_path {
-                        let is_nested = (s.start_line >= chosen_sym.start_line && s.end_line <= chosen_sym.end_line)
-                            || (chosen_sym.start_line >= s.start_line && chosen_sym.end_line <= s.end_line);
+                        let is_nested = (s.start_line >= chosen_sym.start_line
+                            && s.end_line <= chosen_sym.end_line)
+                            || (chosen_sym.start_line >= s.start_line
+                                && chosen_sym.end_line <= s.end_line);
                         !is_nested
                     } else {
                         true
@@ -751,7 +787,10 @@ impl VectorGraph {
         // Find the definition(s) of this symbol
         let decls = self.find_symbol(symbol_name);
         let matching_decl = if let Some(hint) = file_hint {
-            decls.iter().find(|(p, _)| p == hint || p.ends_with(hint)).or_else(|| decls.first())
+            decls
+                .iter()
+                .find(|(p, _)| p == hint || p.ends_with(hint))
+                .or_else(|| decls.first())
         } else {
             decls.first()
         };
@@ -761,7 +800,8 @@ impl VectorGraph {
                 .iter()
                 .filter(|(p, s)| {
                     if p == m_path {
-                        let is_nested = (s.start_line >= m_sym.start_line && s.end_line <= m_sym.end_line)
+                        let is_nested = (s.start_line >= m_sym.start_line
+                            && s.end_line <= m_sym.end_line)
                             || (m_sym.start_line >= s.start_line && m_sym.end_line <= s.end_line);
                         !is_nested
                     } else {
@@ -794,7 +834,10 @@ impl VectorGraph {
                     for (other_path, other_node) in &self.files {
                         for other_s in &other_node.symbols {
                             // Callees must be callable (Function or Method), not classes or structs
-                            if other_s.kind != SymbolKind::Function && other_s.kind != SymbolKind::Method && other_s.kind != SymbolKind::Unknown {
+                            if other_s.kind != SymbolKind::Function
+                                && other_s.kind != SymbolKind::Method
+                                && other_s.kind != SymbolKind::Unknown
+                            {
                                 continue;
                             }
 
@@ -804,12 +847,17 @@ impl VectorGraph {
                             }
 
                             // If sym is a class or enclosing symbol, exclude methods defined inside it
-                            if other_path == path && other_s.start_line >= sym.start_line && other_s.end_line <= sym.end_line {
+                            if other_path == path
+                                && other_s.start_line >= sym.start_line
+                                && other_s.end_line <= sym.end_line
+                            {
                                 continue;
                             }
 
                             // Check if other_s.name is called inside the body
-                            if is_callee_call(&body_text, &other_s.name) && !callees.contains(&other_s.name) {
+                            if is_callee_call(&body_text, &other_s.name)
+                                && !callees.contains(&other_s.name)
+                            {
                                 callees.push(other_s.name.clone());
                                 if callees.len() >= 10 {
                                     break;
@@ -845,7 +893,11 @@ impl VectorGraph {
 /// Check if a symbol appears in line as a direct call, constructor invocation, or template instantiation
 pub fn is_direct_call_or_construction(line: &str, symbol_name: &str) -> bool {
     let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+    if trimmed.is_empty()
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+    {
         return false;
     }
 
@@ -890,8 +942,8 @@ pub fn is_direct_call_or_construction(line: &str, symbol_name: &str) -> bool {
             }
 
             // 2. Template instantiation: e.g. make_unique<Symbol>(...) or make_shared<Symbol>(...) or Vector<Symbol>()
-            if rest.starts_with('>') {
-                let after_gt = rest[1..].trim_start();
+            if let Some(after_gt) = rest.strip_prefix('>') {
+                let after_gt = after_gt.trim_start();
                 if after_gt.starts_with('(') || after_gt.starts_with('{') {
                     return true;
                 }
@@ -914,8 +966,24 @@ pub fn is_callee_call(body_text: &str, func_name: &str) -> bool {
         return false;
     }
     let keywords = [
-        "if", "for", "while", "switch", "catch", "return", "sizeof", "new", "delete",
-        "typeof", "instanceof", "decltype", "throw", "case", "auto", "void", "int", "bool"
+        "if",
+        "for",
+        "while",
+        "switch",
+        "catch",
+        "return",
+        "sizeof",
+        "new",
+        "delete",
+        "typeof",
+        "instanceof",
+        "decltype",
+        "throw",
+        "case",
+        "auto",
+        "void",
+        "int",
+        "bool",
     ];
     if keywords.contains(&func_name) {
         return false;
@@ -923,7 +991,11 @@ pub fn is_callee_call(body_text: &str, func_name: &str) -> bool {
 
     for line in body_text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with('*')
+        {
             continue;
         }
 
@@ -1023,25 +1095,35 @@ fn is_word_match(line: &str, word: &str) -> bool {
 /// Helper to distinguish code files from documentation, schemas, and assets
 fn is_code_file_node(node: &FileNode) -> bool {
     let non_code_extensions = [
-        "md", "markdown", "json", "yaml", "yml", "toml", "txt", "csv", "xml", "html", "svg", "css", "scss", "changelog",
+        "md",
+        "markdown",
+        "json",
+        "yaml",
+        "yml",
+        "toml",
+        "txt",
+        "csv",
+        "xml",
+        "html",
+        "svg",
+        "css",
+        "scss",
+        "changelog",
     ];
-    if let Some(ref ext) = node.extension {
-        if non_code_extensions.contains(&ext.to_lowercase().as_str()) {
-            return false;
-        }
+    if let Some(ref ext) = node.extension
+        && non_code_extensions.contains(&ext.to_lowercase().as_str())
+    {
+        return false;
     }
     let code_extensions = [
-        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs",
-        "py", "pyw", "pyi",
-        "c", "cpp", "cxx", "cc", "h", "hpp", "hxx",
-        "go", "java", "kt", "kts", "swift", "rb",
-        "cs", "php", "scala", "dart", "zig", "lua",
-        "sh", "bash", "zsh",
+        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "pyw", "pyi", "c", "cpp", "cxx", "cc",
+        "h", "hpp", "hxx", "go", "java", "kt", "kts", "swift", "rb", "cs", "php", "scala", "dart",
+        "zig", "lua", "sh", "bash", "zsh",
     ];
-    if let Some(ref ext) = node.extension {
-        if code_extensions.contains(&ext.to_lowercase().as_str()) {
-            return true;
-        }
+    if let Some(ref ext) = node.extension
+        && code_extensions.contains(&ext.to_lowercase().as_str())
+    {
+        return true;
     }
     !node.symbols.is_empty()
 }
@@ -1122,8 +1204,16 @@ mod tests {
             doc_comment: None,
         };
 
-        graph.upsert_file(make_test_node("src/module_a.rs", "fn init() -> bool {\n true \n}\n", vec![sym_a]));
-        graph.upsert_file(make_test_node("src/module_b.rs", "fn init() -> Result<()> {\n Ok(()) \n}\n", vec![sym_b]));
+        graph.upsert_file(make_test_node(
+            "src/module_a.rs",
+            "fn init() -> bool {\n true \n}\n",
+            vec![sym_a],
+        ));
+        graph.upsert_file(make_test_node(
+            "src/module_b.rs",
+            "fn init() -> Result<()> {\n Ok(()) \n}\n",
+            vec![sym_b],
+        ));
 
         // Query without file hint
         let res = graph.get_symbol_body("init", None).unwrap();
@@ -1131,7 +1221,9 @@ mod tests {
         assert!(res.candidates[0].contains("init()"));
 
         // Query with file hint for module_b (should have zero candidates because caller disambiguated)
-        let res_b = graph.get_symbol_body("init", Some(Path::new("src/module_b.rs"))).unwrap();
+        let res_b = graph
+            .get_symbol_body("init", Some(Path::new("src/module_b.rs")))
+            .unwrap();
         assert_eq!(res_b.file, "src/module_b.rs");
         assert_eq!(res_b.candidates.len(), 0);
     }
@@ -1150,7 +1242,11 @@ mod tests {
             signature: "fn run_job()".to_string(),
             doc_comment: None,
         };
-        graph.upsert_file(make_test_node("src/caller.rs", caller_content, vec![caller_sym]));
+        graph.upsert_file(make_test_node(
+            "src/caller.rs",
+            caller_content,
+            vec![caller_sym],
+        ));
 
         // 2. Target file: calls helper_fn, but also mentions TypeName
         let target_content = "fn execute_task() {\n    let cfg = Config {};\n    helper_fn();\n}\n";
@@ -1162,7 +1258,11 @@ mod tests {
             signature: "fn execute_task()".to_string(),
             doc_comment: None,
         };
-        graph.upsert_file(make_test_node("src/target.rs", target_content, vec![target_sym]));
+        graph.upsert_file(make_test_node(
+            "src/target.rs",
+            target_content,
+            vec![target_sym],
+        ));
 
         // 3. Child file (callee)
         let child_content = "fn helper_fn() {}\n";
@@ -1183,7 +1283,11 @@ mod tests {
             signature: "struct Config".to_string(),
             doc_comment: None,
         };
-        graph.upsert_file(make_test_node("src/helper.rs", child_content, vec![child_sym, type_sym]));
+        graph.upsert_file(make_test_node(
+            "src/helper.rs",
+            child_content,
+            vec![child_sym, type_sym],
+        ));
 
         let impact = graph.get_impact_radius("execute_task", None);
         assert_eq!(impact.target_symbol, "execute_task");
@@ -1200,19 +1304,34 @@ mod tests {
 
     #[test]
     fn test_is_callee_call_detection() {
-        assert!(is_callee_call("let res = calculate_hash();", "calculate_hash"));
-        assert!(is_callee_call("foo.calculate_hash(arg1, arg2);", "calculate_hash"));
+        assert!(is_callee_call(
+            "let res = calculate_hash();",
+            "calculate_hash"
+        ));
+        assert!(is_callee_call(
+            "foo.calculate_hash(arg1, arg2);",
+            "calculate_hash"
+        ));
         assert!(is_callee_call("calculate_hash();", "calculate_hash"));
 
         // Declarations should NOT match as calls
         assert!(!is_callee_call("fn calculate_hash() {", "calculate_hash"));
-        assert!(!is_callee_call("pub fn calculate_hash() -> usize {", "calculate_hash"));
+        assert!(!is_callee_call(
+            "pub fn calculate_hash() -> usize {",
+            "calculate_hash"
+        ));
         assert!(!is_callee_call("void calculate_hash()", "calculate_hash"));
-        assert!(!is_callee_call("virtual void calculate_hash() const override;", "calculate_hash"));
+        assert!(!is_callee_call(
+            "virtual void calculate_hash() const override;",
+            "calculate_hash"
+        ));
 
         // Mentions without call syntax should NOT match
         assert!(!is_callee_call("let x = calculate_hash;", "calculate_hash"));
-        assert!(!is_callee_call("// calculate_hash() commented out", "calculate_hash"));
+        assert!(!is_callee_call(
+            "// calculate_hash() commented out",
+            "calculate_hash"
+        ));
     }
 
     #[test]
@@ -1252,26 +1371,41 @@ mod tests {
             signature: "fn target_func()".to_string(),
             doc_comment: None,
         };
-        graph.upsert_file(make_test_node("src/target.rs", "fn target_func() {}", vec![target_sym]));
+        graph.upsert_file(make_test_node(
+            "src/target.rs",
+            "fn target_func() {}",
+            vec![target_sym],
+        ));
 
         // Source file importing target
-        let mut source_node = make_test_node("src/source.rs", "use crate::target;\nfn run() { target_func(); }", vec![]);
+        let mut source_node = make_test_node(
+            "src/source.rs",
+            "use crate::target;\nfn run() { target_func(); }",
+            vec![],
+        );
         source_node.imports = vec!["target".to_string()];
         graph.upsert_file(source_node.clone());
 
         let src_idx = graph.node_indices[&PathBuf::from("src/source.rs")];
         let tgt_idx = graph.node_indices[&PathBuf::from("src/target.rs")];
-        assert!(graph.graph.find_edge(src_idx, tgt_idx).is_some(), "Edge should exist initially");
+        assert!(
+            graph.graph.find_edge(src_idx, tgt_idx).is_some(),
+            "Edge should exist initially"
+        );
 
         // Now update source file to remove the import
-        let mut updated_source = make_test_node("src/source.rs", "fn run() { /* no import */ }", vec![]);
+        let mut updated_source =
+            make_test_node("src/source.rs", "fn run() { /* no import */ }", vec![]);
         updated_source.imports = vec![];
         // Ensure content differs so it doesn't short-circuit
         updated_source.size_bytes = 100;
         updated_source.content_hash = 999;
         graph.upsert_file(updated_source);
 
-        assert!(graph.graph.find_edge(src_idx, tgt_idx).is_none(), "Stale edge should have been cleared");
+        assert!(
+            graph.graph.find_edge(src_idx, tgt_idx).is_none(),
+            "Stale edge should have been cleared"
+        );
     }
 
     #[test]
@@ -1328,7 +1462,11 @@ mod tests {
     fn test_find_references_code_only() {
         let mut graph = VectorGraph::new();
         let code_node = make_test_node("src/lib.rs", "let effect = WindowEffect::Blur;", vec![]);
-        let mut doc_node = make_test_node("CHANGELOG.md", "# Release\nWindowEffect was modified.", vec![]);
+        let mut doc_node = make_test_node(
+            "CHANGELOG.md",
+            "# Release\nWindowEffect was modified.",
+            vec![],
+        );
         doc_node.extension = Some("md".to_string());
 
         graph.upsert_file(code_node);

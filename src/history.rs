@@ -86,8 +86,12 @@ impl HistoryCache {
 
         // If moved, update origin mapping
         if let FileOperation::Moved { ref from, .. } = operation {
-            self.hash_to_path.remove(&compute_hash(new_content.as_ref().unwrap()));
-            self.hash_to_path.insert(compute_hash(new_content.as_ref().unwrap()), path.to_path_buf());
+            self.hash_to_path
+                .remove(&compute_hash(new_content.as_ref().unwrap()));
+            self.hash_to_path.insert(
+                compute_hash(new_content.as_ref().unwrap()),
+                path.to_path_buf(),
+            );
             let _ = from;
         } else if let Some(h) = new_hash {
             self.hash_to_path.insert(h, path.to_path_buf());
@@ -102,12 +106,8 @@ impl HistoryCache {
                     Some(generate_diff(path, old_c, new_c))
                 }
             }
-            (Some(old_c), None) => {
-                Some(generate_deletion_diff(path, old_c))
-            }
-            (None, Some(new_c)) => {
-                Some(generate_creation_diff(path, new_c))
-            }
+            (Some(old_c), None) => Some(generate_deletion_diff(path, old_c)),
+            (None, Some(new_c)) => Some(generate_creation_diff(path, new_c)),
             (None, None) => None,
         };
 
@@ -125,16 +125,33 @@ impl HistoryCache {
         }
 
         let desc = match &operation {
-            FileOperation::Created => format!("File '{}' was created ({} lines)", path.display(), new_content.as_ref().map(|c| c.lines().count()).unwrap_or(0)),
+            FileOperation::Created => format!(
+                "File '{}' was created ({} lines)",
+                path.display(),
+                new_content.as_ref().map(|c| c.lines().count()).unwrap_or(0)
+            ),
             FileOperation::Modified => format!("File '{}' was modified", path.display()),
-            FileOperation::Deleted => format!("File '{}' was deleted (previously {} lines)", path.display(), old_content.as_ref().map(|c| c.lines().count()).unwrap_or(0)),
-            FileOperation::Moved { from, to } => format!("File moved from '{}' to '{}'", from.display(), to.display()),
-            FileOperation::Copied { from, to } => format!("File copied from '{}' to '{}'", from.display(), to.display()),
+            FileOperation::Deleted => format!(
+                "File '{}' was deleted (previously {} lines)",
+                path.display(),
+                old_content.as_ref().map(|c| c.lines().count()).unwrap_or(0)
+            ),
+            FileOperation::Moved { from, to } => {
+                format!("File moved from '{}' to '{}'", from.display(), to.display())
+            }
+            FileOperation::Copied { from, to } => format!(
+                "File copied from '{}' to '{}'",
+                from.display(),
+                to.display()
+            ),
         };
 
         // Store snapshot
         if let Some(new_c) = &new_content {
-            self.snapshots.entry(path.to_path_buf()).or_default().push((ts.clone(), new_c.clone()));
+            self.snapshots
+                .entry(path.to_path_buf())
+                .or_default()
+                .push((ts.clone(), new_c.clone()));
         }
 
         let record = HistoryRecord {
@@ -160,7 +177,10 @@ impl HistoryCache {
 
     /// Retrieve history records for a specific file
     pub fn get_file_records(&self, path: &Path) -> Vec<&HistoryRecord> {
-        self.records.iter().filter(|r| r.file_path == path).collect()
+        self.records
+            .iter()
+            .filter(|r| r.file_path == path)
+            .collect()
     }
 
     /// Retrieve a specific history record by ID
@@ -185,7 +205,10 @@ impl HistoryCache {
         }
 
         let mut out = String::new();
-        out.push_str(&format!("📜 Codebase Change History ({} events):\n", matching.len()));
+        out.push_str(&format!(
+            "📜 Codebase Change History ({} events):\n",
+            matching.len()
+        ));
         out.push_str("======================================================================\n");
 
         for rec in matching.iter().rev() {
@@ -207,7 +230,10 @@ impl HistoryCache {
             out.push_str(&format!("     ↳ {}\n", rec.description));
 
             if !rec.affected_symbols.is_empty() {
-                out.push_str(&format!("     ↳ Symbols: {}\n", rec.affected_symbols.join(", ")));
+                out.push_str(&format!(
+                    "     ↳ Symbols: {}\n",
+                    rec.affected_symbols.join(", ")
+                ));
             }
 
             if let Some(diff) = &rec.diff {
@@ -225,10 +251,16 @@ impl HistoryCache {
                     out.push_str(&format!("       {}\n", formatted_line));
                 }
                 if diff.lines().count() > 12 {
-                    out.push_str(&format!("       ... +{} more diff lines (use 'diff #{}')\n", diff.lines().count() - 12, rec.id));
+                    out.push_str(&format!(
+                        "       ... +{} more diff lines (use 'diff #{}')\n",
+                        diff.lines().count() - 12,
+                        rec.id
+                    ));
                 }
             }
-            out.push_str("----------------------------------------------------------------------\n");
+            out.push_str(
+                "----------------------------------------------------------------------\n",
+            );
         }
 
         out
@@ -238,7 +270,10 @@ impl HistoryCache {
     pub fn format_record_detail(&self, id: usize) -> Option<String> {
         let rec = self.get_record_by_id(id)?;
         let mut out = String::new();
-        out.push_str(&format!("📜 History Event #{}: {}\n", rec.id, rec.description));
+        out.push_str(&format!(
+            "📜 History Event #{}: {}\n",
+            rec.id, rec.description
+        ));
         out.push_str(&format!("Timestamp: {}\n", rec.timestamp));
         out.push_str(&format!("File: {}\n", rec.file_path.display()));
         out.push_str(&format!("Operation: {}\n", rec.operation));
@@ -246,7 +281,9 @@ impl HistoryCache {
 
         if let Some(diff) = &rec.diff {
             out.push_str("Diff against prior state:\n");
-            out.push_str("----------------------------------------------------------------------\n");
+            out.push_str(
+                "----------------------------------------------------------------------\n",
+            );
             for line in diff.lines() {
                 let formatted = if line.starts_with('+') {
                     line.green()
@@ -259,12 +296,14 @@ impl HistoryCache {
                 };
                 out.push_str(&format!("{}\n", formatted));
             }
-            out.push_str("\n");
+            out.push('\n');
         }
 
         if let Some(old) = &rec.old_content {
             out.push_str("Older (Previous) File Content:\n");
-            out.push_str("----------------------------------------------------------------------\n");
+            out.push_str(
+                "----------------------------------------------------------------------\n",
+            );
             for (idx, line) in old.lines().enumerate() {
                 out.push_str(&format!("{:4} | {}\n", idx + 1, line));
             }
@@ -287,7 +326,9 @@ fn compute_hash(s: &str) -> u64 {
 
 fn current_time_str() -> String {
     let now = SystemTime::now();
-    let duration = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let duration = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = duration.as_secs();
     let hours = (secs / 3600) % 24;
     let mins = (secs / 60) % 60;
@@ -326,7 +367,10 @@ pub fn generate_diff(path: &Path, old: &str, new: &str) -> String {
                     if di == 0 && dj == 0 {
                         continue;
                     }
-                    if i + di < old_lines.len() && j + dj < new_lines.len() && old_lines[i + di] == new_lines[j + dj] {
+                    if i + di < old_lines.len()
+                        && j + dj < new_lines.len()
+                        && old_lines[i + di] == new_lines[j + dj]
+                    {
                         next_i = i + di;
                         next_j = j + dj;
                         match_found = true;
@@ -341,13 +385,19 @@ pub fn generate_diff(path: &Path, old: &str, new: &str) -> String {
             let end_i = if match_found { next_i } else { old_lines.len() };
             let end_j = if match_found { next_j } else { new_lines.len() };
 
-            diff.push(format!("@@ -{},{} +{},{} @@", start_i + 1, end_i - start_i, start_j + 1, end_j - start_j));
+            diff.push(format!(
+                "@@ -{},{} +{},{} @@",
+                start_i + 1,
+                end_i - start_i,
+                start_j + 1,
+                end_j - start_j
+            ));
 
-            for k in start_i..end_i {
-                diff.push(format!("-{}", old_lines[k]));
+            for line in &old_lines[start_i..end_i] {
+                diff.push(format!("-{}", line));
             }
-            for k in start_j..end_j {
-                diff.push(format!("+{}", new_lines[k]));
+            for line in &new_lines[start_j..end_j] {
+                diff.push(format!("+{}", line));
             }
 
             i = end_i;
@@ -360,7 +410,7 @@ pub fn generate_diff(path: &Path, old: &str, new: &str) -> String {
 
 fn generate_creation_diff(path: &Path, new: &str) -> String {
     let mut diff = Vec::new();
-    diff.push(format!("--- /dev/null"));
+    diff.push("--- /dev/null".to_string());
     diff.push(format!("+++ b/{}", path.display()));
     diff.push(format!("@@ -0,0 +1,{} @@", new.lines().count()));
     for line in new.lines().take(20) {
@@ -375,7 +425,7 @@ fn generate_creation_diff(path: &Path, new: &str) -> String {
 fn generate_deletion_diff(path: &Path, old: &str) -> String {
     let mut diff = Vec::new();
     diff.push(format!("--- a/{}", path.display()));
-    diff.push(format!("+++ /dev/null"));
+    diff.push("+++ /dev/null".to_string());
     diff.push(format!("@@ -1,{} +0,0 @@", old.lines().count()));
     for line in old.lines().take(20) {
         diff.push(format!("-{}", line));
@@ -403,7 +453,9 @@ mod tests {
         let rec = cache.record_change(
             path,
             Some("fn hello() {\n    println!(\"world\");\n}\n".to_string()),
-            Some("fn hello() {\n    println!(\"world modified\");\n}\nfn goodbye() {}\n".to_string()),
+            Some(
+                "fn hello() {\n    println!(\"world modified\");\n}\nfn goodbye() {}\n".to_string(),
+            ),
             &before,
             &after,
         );

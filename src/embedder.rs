@@ -68,7 +68,7 @@ impl VectorEmbedder {
         vector
     }
 
-    fn tokenize<'a>(&self, text: &'a str) -> Vec<String> {
+    fn tokenize(&self, text: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut current = String::new();
 
@@ -127,6 +127,9 @@ mod tests {
         let sim_close = VectorEmbedder::cosine_similarity(&v1, &v2);
         let sim_far = VectorEmbedder::cosine_similarity(&v1, &v3);
 
-        assert!(sim_close > sim_far, "v1 and v2 should be closer than v1 and v3");
+        assert!(
+            sim_close > sim_far,
+            "v1 and v2 should be closer than v1 and v3"
+        );
     }
 }

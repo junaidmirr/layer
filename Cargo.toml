@@ -2,6 +2,11 @@
 name = "layer"
 version = "0.1.0"
 edition = "2024"
+description = "High-performance AST code intelligence and Model Context Protocol (MCP) server for AI coding agents"
+license = "MIT"
+readme = "README.md"
+keywords = ["mcp", "code-intelligence", "ast", "context-engine", "ai-agents"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

@@ -7,7 +7,8 @@ static RUST_FN_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RUST_STRUCT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum|trait)\s+([a-zA-Z0-9_]+)").unwrap()
+    Regex::new(r"(?m)^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum|trait)\s+([a-zA-Z0-9_]+)")
+        .unwrap()
 });
 
 static RUST_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -15,28 +16,33 @@ static RUST_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static JS_TS_FN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*(?:export(?:\s+default)?\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(").unwrap()
+    Regex::new(
+        r"(?m)^[ \t]*(?:export(?:\s+default)?\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(",
+    )
+    .unwrap()
 });
 
 static JS_TS_METHOD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*(?:(?:public|private|protected|static|async)\s+)+([a-zA-Z0-9_]+)\s*\(").unwrap()
+    Regex::new(r"(?m)^[ \t]*(?:(?:public|private|protected|static|async)\s+)+([a-zA-Z0-9_]+)\s*\(")
+        .unwrap()
 });
 
 static JS_TS_CLASS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*(?:export(?:\s+default)?\s+)?(?:class|interface|type)\s+([a-zA-Z0-9_]+)").unwrap()
+    Regex::new(
+        r"(?m)^[ \t]*(?:export(?:\s+default)?\s+)?(?:class|interface|type)\s+([a-zA-Z0-9_]+)",
+    )
+    .unwrap()
 });
 
 static JS_TS_CONST_FN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^[ \t]*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>").unwrap()
 });
 
-static PYTHON_DEF_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*(?:async\s+)?def\s+([a-zA-Z0-9_]+)\s*\(").unwrap()
-});
+static PYTHON_DEF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^[ \t]*(?:async\s+)?def\s+([a-zA-Z0-9_]+)\s*\(").unwrap());
 
-static PYTHON_CLASS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*class\s+([a-zA-Z0-9_]+)").unwrap()
-});
+static PYTHON_CLASS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^[ \t]*class\s+([a-zA-Z0-9_]+)").unwrap());
 
 static GO_FUNC_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^[ \t]*func\s+(?:\([^)]+\)\s+)?([a-zA-Z0-9_]+)\s*\(").unwrap()
@@ -60,10 +66,13 @@ impl AstScanner {
 
         match ext.as_str() {
             "rs" => Self::scan_rust(&lines, &mut symbols),
-            "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => Self::scan_javascript_typescript(&lines, &mut symbols),
+            "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => {
+                Self::scan_javascript_typescript(&lines, &mut symbols)
+            }
             "py" | "pyw" => Self::scan_python(&lines, &mut symbols),
             "go" => Self::scan_go(&lines, &mut symbols),
-            "c" | "cpp" | "cxx" | "cc" | "h" | "hpp" | "hxx" | "java" | "kt" | "swift" | "cs" | "php" | "scala" | "dart" | "zig" => Self::scan_generic(&lines, &mut symbols),
+            "c" | "cpp" | "cxx" | "cc" | "h" | "hpp" | "hxx" | "java" | "kt" | "swift" | "cs"
+            | "php" | "scala" | "dart" | "zig" => Self::scan_generic(&lines, &mut symbols),
             _ => {}
         }
 
@@ -80,29 +89,27 @@ impl AstScanner {
             match ext.as_str() {
                 "rs" => {
                     let s = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
-                    let s = s.strip_prefix("(crate) ").or_else(|| s.strip_prefix("(super) ")).unwrap_or(s);
+                    let s = s
+                        .strip_prefix("(crate) ")
+                        .or_else(|| s.strip_prefix("(super) "))
+                        .unwrap_or(s);
                     if s.starts_with("use ") || s.starts_with("mod ") {
                         imports.push(trimmed.trim_end_matches(';').to_string());
                     }
                 }
-                "js" | "jsx" | "ts" | "tsx" => {
-                    if trimmed.starts_with("import ")
+                "js" | "jsx" | "ts" | "tsx"
+                    if (trimmed.starts_with("import ")
                         || trimmed.starts_with("export {")
                         || trimmed.starts_with("export * from")
-                        || (trimmed.contains("require(") && !trimmed.starts_with("//"))
-                    {
-                        imports.push(trimmed.to_string());
-                    }
+                        || (trimmed.contains("require(") && !trimmed.starts_with("//"))) =>
+                {
+                    imports.push(trimmed.to_string());
                 }
-                "py" => {
-                    if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
-                        imports.push(trimmed.to_string());
-                    }
+                "py" if (trimmed.starts_with("import ") || trimmed.starts_with("from ")) => {
+                    imports.push(trimmed.to_string());
                 }
-                "go" => {
-                    if trimmed.starts_with("import ") {
-                        imports.push(trimmed.to_string());
-                    }
+                "go" if trimmed.starts_with("import ") => {
+                    imports.push(trimmed.to_string());
                 }
                 _ => {}
             }
@@ -144,17 +151,17 @@ impl AstScanner {
                         doc_comment: find_doc_comment(lines, idx),
                     });
                 }
-            } else if let Some(caps) = RUST_TYPE_RE.captures(line) {
-                if let Some(name_match) = caps.get(1) {
-                    symbols.push(Symbol {
-                        name: name_match.as_str().to_string(),
-                        kind: SymbolKind::TypeAlias,
-                        start_line: line_num,
-                        end_line: line_num,
-                        signature: line.trim().trim_end_matches(';').to_string(),
-                        doc_comment: find_doc_comment(lines, idx),
-                    });
-                }
+            } else if let Some(caps) = RUST_TYPE_RE.captures(line)
+                && let Some(name_match) = caps.get(1)
+            {
+                symbols.push(Symbol {
+                    name: name_match.as_str().to_string(),
+                    kind: SymbolKind::TypeAlias,
+                    start_line: line_num,
+                    end_line: line_num,
+                    signature: line.trim().trim_end_matches(';').to_string(),
+                    doc_comment: find_doc_comment(lines, idx),
+                });
             }
         }
     }
@@ -198,20 +205,20 @@ impl AstScanner {
                         doc_comment: find_doc_comment(lines, idx),
                     });
                 }
-            } else if let Some(caps) = JS_TS_METHOD_RE.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    let name = m.as_str();
-                    if name != "if" && name != "for" && name != "while" && name != "switch" {
-                        let end_line = find_block_end(lines, idx);
-                        symbols.push(Symbol {
-                            name: name.to_string(),
-                            kind: SymbolKind::Method,
-                            start_line: line_num,
-                            end_line,
-                            signature: line.trim().to_string(),
-                            doc_comment: find_doc_comment(lines, idx),
-                        });
-                    }
+            } else if let Some(caps) = JS_TS_METHOD_RE.captures(line)
+                && let Some(m) = caps.get(1)
+            {
+                let name = m.as_str();
+                if name != "if" && name != "for" && name != "while" && name != "switch" {
+                    let end_line = find_block_end(lines, idx);
+                    symbols.push(Symbol {
+                        name: name.to_string(),
+                        kind: SymbolKind::Method,
+                        start_line: line_num,
+                        end_line,
+                        signature: line.trim().to_string(),
+                        doc_comment: find_doc_comment(lines, idx),
+                    });
                 }
             }
         }
@@ -224,7 +231,11 @@ impl AstScanner {
                 if let Some(m) = caps.get(1) {
                     let end_line = find_python_block_end(lines, idx);
                     let indent = line.len() - line.trim_start().len();
-                    let kind = if indent > 0 { SymbolKind::Method } else { SymbolKind::Function };
+                    let kind = if indent > 0 {
+                        SymbolKind::Method
+                    } else {
+                        SymbolKind::Function
+                    };
                     symbols.push(Symbol {
                         name: m.as_str().to_string(),
                         kind,
@@ -234,18 +245,18 @@ impl AstScanner {
                         doc_comment: find_python_docstring(lines, idx),
                     });
                 }
-            } else if let Some(caps) = PYTHON_CLASS_RE.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    let end_line = find_python_block_end(lines, idx);
-                    symbols.push(Symbol {
-                        name: m.as_str().to_string(),
-                        kind: SymbolKind::Class,
-                        start_line: line_num,
-                        end_line,
-                        signature: line.trim().to_string(),
-                        doc_comment: find_python_docstring(lines, idx),
-                    });
-                }
+            } else if let Some(caps) = PYTHON_CLASS_RE.captures(line)
+                && let Some(m) = caps.get(1)
+            {
+                let end_line = find_python_block_end(lines, idx);
+                symbols.push(Symbol {
+                    name: m.as_str().to_string(),
+                    kind: SymbolKind::Class,
+                    start_line: line_num,
+                    end_line,
+                    signature: line.trim().to_string(),
+                    doc_comment: find_python_docstring(lines, idx),
+                });
             }
         }
     }
@@ -253,18 +264,18 @@ impl AstScanner {
     fn scan_go(lines: &[&str], symbols: &mut Vec<Symbol>) {
         for (idx, &line) in lines.iter().enumerate() {
             let line_num = idx + 1;
-            if let Some(caps) = GO_FUNC_RE.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    let end_line = find_block_end(lines, idx);
-                    symbols.push(Symbol {
-                        name: m.as_str().to_string(),
-                        kind: SymbolKind::Function,
-                        start_line: line_num,
-                        end_line,
-                        signature: line.trim().to_string(),
-                        doc_comment: find_doc_comment(lines, idx),
-                    });
-                }
+            if let Some(caps) = GO_FUNC_RE.captures(line)
+                && let Some(m) = caps.get(1)
+            {
+                let end_line = find_block_end(lines, idx);
+                symbols.push(Symbol {
+                    name: m.as_str().to_string(),
+                    kind: SymbolKind::Function,
+                    start_line: line_num,
+                    end_line,
+                    signature: line.trim().to_string(),
+                    doc_comment: find_doc_comment(lines, idx),
+                });
             }
         }
     }
@@ -289,20 +300,20 @@ impl AstScanner {
                         doc_comment: find_doc_comment(lines, idx),
                     });
                 }
-            } else if let Some(caps) = GENERIC_FN_RE.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    let name = m.as_str();
-                    if !["if", "for", "while", "switch", "catch", "return", "sizeof"].contains(&name) {
-                        let end_line = find_block_end(lines, idx);
-                        symbols.push(Symbol {
-                            name: name.to_string(),
-                            kind: SymbolKind::Function,
-                            start_line: line_num,
-                            end_line,
-                            signature: line.trim().to_string(),
-                            doc_comment: find_doc_comment(lines, idx),
-                        });
-                    }
+            } else if let Some(caps) = GENERIC_FN_RE.captures(line)
+                && let Some(m) = caps.get(1)
+            {
+                let name = m.as_str();
+                if !["if", "for", "while", "switch", "catch", "return", "sizeof"].contains(&name) {
+                    let end_line = find_block_end(lines, idx);
+                    symbols.push(Symbol {
+                        name: name.to_string(),
+                        kind: SymbolKind::Function,
+                        start_line: line_num,
+                        end_line,
+                        signature: line.trim().to_string(),
+                        doc_comment: find_doc_comment(lines, idx),
+                    });
                 }
             }
         }
@@ -313,8 +324,7 @@ fn find_block_end(lines: &[&str], start_idx: usize) -> usize {
     let mut brace_count = 0;
     let mut found_open = false;
 
-    for i in start_idx..lines.len() {
-        let line = lines[i];
+    for (i, &line) in lines.iter().enumerate().skip(start_idx) {
         for ch in line.chars() {
             if ch == '{' {
                 brace_count += 1;
@@ -341,8 +351,7 @@ fn find_python_block_end(lines: &[&str], start_idx: usize) -> usize {
     let base_indent = base_line.len() - base_line.trim_start().len();
 
     let mut last_content_line = start_idx + 1;
-    for i in (start_idx + 1)..lines.len() {
-        let line = lines[i];
+    for (i, &line) in lines.iter().enumerate().skip(start_idx + 1) {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
@@ -364,7 +373,11 @@ fn find_doc_comment(lines: &[&str], start_idx: usize) -> Option<String> {
     while i > 0 {
         i -= 1;
         let line = lines[i].trim();
-        if line.starts_with("///") || line.starts_with("//!") || line.starts_with("/**") || line.starts_with("*") {
+        if line.starts_with("///")
+            || line.starts_with("//!")
+            || line.starts_with("/**")
+            || line.starts_with("*")
+        {
             comments.push(line.to_string());
         } else if line.is_empty() {
             continue;
