@@ -1,4 +1,13 @@
-# `layer` ⚡
+
+<p align="center">
+  <img
+    src="[https://your-image-url.com/logo.png](https://i.ibb.co/C3WXFR6j/Layer-Smarter-Context-Faster-Agents.png)"
+    alt="Project Logo"
+    width="200"
+    style="max-width: 100%; height: auto;"
+  />
+</p>
+
 
 [![CI](https://github.com/your-username/layer/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/layer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
