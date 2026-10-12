@@ -1,0 +1,590 @@
+use crate::graph::VectorGraph;
+use serde_json::json;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// Runs an MCP-compliant JSON-RPC stdio server
+pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::Result<()> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
+
+    let mut line = String::new();
+    while reader.read_line(&mut line)? > 0 {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            line.clear();
+            continue;
+        }
+
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
+                let id = val.get("id").cloned();
+                handle_rpc_method(&graph, &mut root, method, id, val.get("params"), &mut writer)?;
+            }
+        }
+
+        line.clear();
+    }
+
+    Ok(())
+}
+
+fn handle_rpc_method(
+    graph: &Arc<Mutex<VectorGraph>>,
+    root: &mut PathBuf,
+    method: &str,
+    id: Option<serde_json::Value>,
+    params: Option<&serde_json::Value>,
+    writer: &mut io::StdoutLock,
+) -> io::Result<()> {
+    match method {
+        "initialize" => {
+            // If the client supplies rootUri, rootPath, or workspaceFolders, update workspace root
+            if let Some(p) = params {
+                let client_uri = p.get("rootUri")
+                    .and_then(|u| u.as_str())
+                    .or_else(|| {
+                        p.get("workspaceFolders")
+                            .and_then(|w| w.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|obj| obj.get("uri"))
+                            .and_then(|u| u.as_str())
+                    });
+
+                if let Some(uri_str) = client_uri {
+                    let cleaned_path = if let Some(stripped) = uri_str.strip_prefix("file://") {
+                        stripped
+                    } else {
+                        uri_str
+                    };
+                    let new_root = PathBuf::from(cleaned_path);
+                    if new_root.exists() && new_root.is_dir() && new_root != *root {
+                        eprintln!("[layer-mcp] Switching workspace root to: {}", new_root.display());
+                        *root = new_root.clone();
+                        if let Ok(mut g) = graph.lock() {
+                            g.clear();
+                            g.sync_workspace(&new_root);
+                        }
+                    }
+                } else if let Some(path_str) = p.get("rootPath").and_then(|u| u.as_str()) {
+                    let new_root = PathBuf::from(path_str);
+                    if new_root.exists() && new_root.is_dir() && new_root != *root {
+                        eprintln!("[layer-mcp] Switching workspace root to: {}", new_root.display());
+                        *root = new_root.clone();
+                        if let Ok(mut g) = graph.lock() {
+                            g.clear();
+                            g.sync_workspace(&new_root);
+                        }
+                    }
+                }
+            }
+
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {
+                        "name": "layer-context-engine",
+                        "version": "0.1.0"
+                    },
+                    "capabilities": {
+                        "tools": {}
+                    }
+                }
+            });
+            send_json_line(writer, &resp)?;
+        }
+        "notifications/initialized" => {
+            // No response required for notifications
+        }
+        "tools/list" => {
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "tools": [
+                        {
+                            "name": "get_file_skeleton",
+                            "description": "PREFERRED over reading entire files. Retrieves the outline of a file (imports, classes, functions, and method signatures with line numbers) without bodies. Use this first when exploring a file or understanding module structure.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Relative path to the file in the workspace"
+                                    }
+                                },
+                                "required": ["path"]
+                            }
+                        },
+                        {
+                            "name": "find_symbol",
+                            "description": "PREFERRED over grep for symbol definitions. Finds exact declarations and definitions of a function, class, or struct across all files with line ranges and doc comments.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Exact or partial symbol name (e.g., 'TimelineView', 'InsertClipCommand')"
+                                    }
+                                },
+                                "required": ["name"]
+                            }
+                        },
+                        {
+                            "name": "find_references",
+                            "description": "Finds all occurrences, usages, and references to a symbol across the entire codebase with line numbers and surrounding snippets.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "symbol": {
+                                        "type": "string",
+                                        "description": "The function, class, or symbol name to look up"
+                                    }
+                                },
+                                "required": ["symbol"]
+                            }
+                        },
+                        {
+                            "name": "get_callers",
+                            "description": "PREFERRED over ripgrep/grep for finding callers. Instantly returns which functions, methods, or tests call this symbol, including enclosing caller names, file paths, line ranges, and call-site snippets without manual file reading.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "symbol": {
+                                        "type": "string",
+                                        "description": "The function, class, or method name to find callers for"
+                                    }
+                                },
+                                "required": ["symbol"]
+                            }
+                        },
+                        {
+                            "name": "get_lines",
+                            "description": "PREFERRED over reading entire files with cat/head. Retrieves an exact slice of lines from a file (1-based, inclusive) in compact plain text.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Relative path to the file"
+                                    },
+                                    "start": {
+                                        "type": "integer",
+                                        "description": "1-based starting line number"
+                                    },
+                                    "end": {
+                                        "type": "integer",
+                                        "description": "1-based ending line number"
+                                    }
+                                },
+                                "required": ["path", "start", "end"]
+                            }
+                        },
+                        {
+                            "name": "search",
+                            "description": "Semantic code search across the project using token and vector similarity. Best for conceptual or keyword queries when symbol names are unknown.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "Search query or concept description"
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "Maximum number of results to return (default: 3)"
+                                    }
+                                },
+                                "required": ["query"]
+                            }
+                        },
+                        {
+                            "name": "get_symbol_body",
+                            "description": "PREFERRED over reading full files. Retrieves ONLY the exact implementation body of a specific function, method, or class with exact line numbers, saving context window tokens.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Symbol name (e.g., 'on_open_file_clicked', 'InsertClipCommand')"
+                                    },
+                                    "file": {
+                                        "type": "string",
+                                        "description": "Optional file path hint to disambiguate identical symbol names"
+                                    }
+                                },
+                                "required": ["name"]
+                            }
+                        },
+                        {
+                            "name": "get_impact_radius",
+                            "description": "Comprehensive blast-radius analysis. Returns callers (capped at 10, with total_callers count) and callees (what functions it calls) in one compact response (~300-500 tokens). Use before refactoring, editing, or renaming any symbol.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "symbol": {
+                                        "type": "string",
+                                        "description": "Symbol, function, or class name to analyze impact for"
+                                    },
+                                    "file": {
+                                        "type": "string",
+                                        "description": "Optional file path hint"
+                                    }
+                                },
+                                "required": ["symbol"]
+                            }
+                        },
+                        {
+                            "name": "get_tree",
+                            "description": "Returns a compact plain text overview of files in the project with symbol counts.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {}
+                            }
+                        }
+                    ]
+                }
+            });
+            send_json_line(writer, &resp)?;
+        }
+        "tools/call" => {
+            let tool_name = params
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let arguments = params.and_then(|p| p.get("arguments"));
+
+            let start_time = std::time::Instant::now();
+            let mut g = match graph.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+
+            let content_text = execute_tool(&mut g, root, tool_name, arguments);
+            let duration = start_time.elapsed();
+            let byte_count = content_text.len();
+            let approx_tokens = (byte_count + 3) / 4;
+
+            let log_line = format!(
+                "[layer-mcp] tool_call: '{}' completed in {:?} | size: {} bytes (~{} tokens)\n",
+                tool_name, duration, byte_count, approx_tokens
+            );
+            eprint!("{}", log_line);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/layer_mcp.log") {
+                let _ = f.write_all(log_line.as_bytes());
+            }
+
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": content_text
+                        }
+                    ]
+                }
+            });
+            send_json_line(writer, &resp)?;
+        }
+        _ => {
+            if let Some(id_val) = id {
+                let err = json!({
+                    "jsonrpc": "2.0",
+                    "id": id_val,
+                    "error": {
+                        "code": -32601,
+                        "message": format!("Method '{}' not found", method)
+                    }
+                });
+                send_json_line(writer, &err)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Canonicalizes a path from user/agent, resolves it against root, and ensures it is safely within root
+fn resolve_safe_path(root: &Path, raw_path: &str) -> Result<PathBuf, String> {
+    if raw_path.trim().is_empty() {
+        return Err("Error: Path cannot be empty.".to_string());
+    }
+
+    let input_path = Path::new(raw_path);
+    let candidate = if input_path.is_absolute() {
+        input_path.to_path_buf()
+    } else {
+        root.join(input_path)
+    };
+
+    let canonical_root = match root.canonicalize() {
+        Ok(cr) => cr,
+        Err(_) => root.to_path_buf(),
+    };
+
+    let canonical_target = match candidate.canonicalize() {
+        Ok(ct) => ct,
+        Err(_) => {
+            // Path doesn't exist on disk yet, normalize components
+            use std::path::Component;
+            let mut normalized = PathBuf::new();
+            for comp in candidate.components() {
+                match comp {
+                    Component::ParentDir => {
+                        normalized.pop();
+                    }
+                    Component::Normal(c) => normalized.push(c),
+                    Component::RootDir => normalized.push("/"),
+                    _ => {}
+                }
+            }
+            normalized
+        }
+    };
+
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(format!("Error: Access denied. Path '{}' is outside workspace root.", raw_path));
+    }
+
+    // Convert to relative path from workspace root
+    match canonical_target.strip_prefix(&canonical_root) {
+        Ok(rel) => Ok(rel.to_path_buf()),
+        Err(_) => Err("Error: Failed to relativize path to workspace root.".to_string()),
+    }
+}
+
+fn execute_tool(
+    g: &mut VectorGraph,
+    root: &Path,
+    tool_name: &str,
+    args: Option<&serde_json::Value>,
+) -> String {
+    let empty_args = json!({});
+    let args = args.unwrap_or(&empty_args);
+
+    // Synchronously sync workspace with disk to catch newly created/modified/deleted files
+    g.sync_workspace(root);
+
+    // If an explicit path or file was supplied, check that specific file path immediately
+    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+        if let Ok(safe_rel) = resolve_safe_path(root, p) {
+            g.refresh_path_if_modified(root, &safe_rel);
+        }
+    }
+    if let Some(f) = args.get("file").and_then(|v| v.as_str()) {
+        if let Ok(safe_rel) = resolve_safe_path(root, f) {
+            g.refresh_path_if_modified(root, &safe_rel);
+        }
+    }
+
+    match tool_name {
+        "get_file_skeleton" => {
+            let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let safe_rel = match resolve_safe_path(root, path_str) {
+                Ok(p) => p,
+                Err(err_msg) => return err_msg,
+            };
+
+            // Block sensitive files (.env, credentials)
+            let file_name = safe_rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name.to_lowercase().starts_with(".env") || file_name == ".git" || file_name.contains("id_rsa") || file_name.ends_with(".pem") {
+                return format!("Error: Access denied. File '{}' is restricted.", path_str);
+            }
+
+            // Strictly serve only files indexed or within workspace
+            let path_match = g.find_file_match(&safe_rel.to_string_lossy()).unwrap_or(safe_rel);
+            match g.get_file_skeleton(&path_match) {
+                Some(skeleton) => serde_json::to_string(&skeleton).unwrap_or_default(),
+                None => format!("Error: File '{}' not found in workspace index.", path_str),
+            }
+        }
+        "find_symbol" => {
+            let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let hits = g.find_symbol(name);
+            if hits.is_empty() {
+                format!("Symbol '{}' not found in codebase.", name)
+            } else {
+                let list: Vec<_> = hits
+                    .iter()
+                    .map(|(p, s)| {
+                        json!({
+                            "file": p.display().to_string(),
+                            "name": s.name,
+                            "kind": s.kind.to_string(),
+                            "lines": [s.start_line, s.end_line],
+                            "signature": s.signature,
+                            "doc": s.doc_comment
+                        })
+                    })
+                    .collect();
+                serde_json::to_string(&list).unwrap_or_default()
+            }
+        }
+        "find_references" => {
+            let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            let refs = g.find_references(symbol);
+            if refs.is_empty() {
+                format!("No references found for symbol '{}'.", symbol)
+            } else {
+                serde_json::to_string(&refs).unwrap_or_default()
+            }
+        }
+        "get_callers" => {
+            let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            let callers = g.get_callers(symbol);
+            if callers.is_empty() {
+                serde_json::to_string(&json!({
+                    "symbol": symbol,
+                    "callers": [],
+                    "status": "zero_internal_callers",
+                    "confidence": "heuristic_lexical",
+                    "note": "Zero direct callers found in workspace index. Do not assume symbol is completely unused if it is an exported API, virtual method, macro target, or called dynamically."
+                })).unwrap_or_default()
+            } else {
+                serde_json::to_string(&callers).unwrap_or_default()
+            }
+        }
+        "get_lines" => {
+            let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let start = args.get("start").and_then(|s| s.as_u64()).unwrap_or(1) as usize;
+            let end = args.get("end").and_then(|e| e.as_u64()).unwrap_or(start as u64) as usize;
+
+            let safe_rel = match resolve_safe_path(root, path_str) {
+                Ok(p) => p,
+                Err(err_msg) => return err_msg,
+            };
+
+            // Strictly serve only files that exist in the workspace index (which respects .gitignore and file filters)
+            let path_match = match g.find_file_match(&safe_rel.to_string_lossy()) {
+                Some(p) => p,
+                None => return format!("Error: File '{}' not found in workspace index.", path_str),
+            };
+
+            // Block sensitive files (.env*, credentials, keys, certificates)
+            let file_name = path_match.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let name_lower = file_name.to_lowercase();
+            if name_lower.contains(".env") || name_lower == ".git" || name_lower.contains("id_rsa") || name_lower.ends_with(".pem") || name_lower.ends_with(".key") {
+                return format!("Error: Access denied. File '{}' is restricted.", path_str);
+            }
+
+            match g.get_file_lines(&path_match, start, end) {
+                Some(content) => content,
+                None => format!("Error: File '{}' not found in workspace index.", path_str),
+            }
+        }
+        "search" => {
+            let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(3) as usize;
+            let hits = g.search(query, limit);
+            if hits.is_empty() {
+                format!("No results for query '{}'.", query)
+            } else {
+                let list: Vec<_> = hits
+                    .iter()
+                    .map(|h| {
+                        // Limit snippet to at most 8 lines and 400 characters to keep search lean (< 600 tokens total)
+                        let snippet_lines: Vec<&str> = h.snippet.lines().take(8).collect();
+                        let mut compact_snippet = snippet_lines.join("\n");
+                        if compact_snippet.len() > 400 {
+                            compact_snippet.truncate(400);
+                            compact_snippet.push_str("... [truncated]");
+                        }
+                        json!({
+                            "file": h.file_path.display().to_string(),
+                            "score": (h.score * 1000.0).round() / 1000.0,
+                            "symbol": h.symbol_name,
+                            "lines": [h.start_line, h.end_line],
+                            "snippet": compact_snippet
+                        })
+                    })
+                    .collect();
+                serde_json::to_string(&list).unwrap_or_default()
+            }
+        }
+        "get_symbol_body" => {
+            let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let file_hint = args.get("file").and_then(|f| f.as_str()).and_then(|f_str| {
+                match resolve_safe_path(root, f_str) {
+                    Ok(p) => Some(p),
+                    Err(_) => None,
+                }
+            });
+            match g.get_symbol_body(name, file_hint.as_deref()) {
+                Some(body) => serde_json::to_string(&body).unwrap_or_default(),
+                None => format!("Symbol '{}' not found in codebase.", name),
+            }
+        }
+        "get_impact_radius" => {
+            let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            let file_hint = args.get("file").and_then(|f| f.as_str()).and_then(|f_str| {
+                match resolve_safe_path(root, f_str) {
+                    Ok(p) => Some(p),
+                    Err(_) => None,
+                }
+            });
+            let impact = g.get_impact_radius(symbol, file_hint.as_deref());
+            serde_json::to_string(&impact).unwrap_or_default()
+        }
+        "get_tree" => {
+            // Strip formatting tokens for maximum efficiency
+            let mut tree = String::new();
+            for path in g.list_files() {
+                if let Some(node) = g.files.get(&path) {
+                    tree.push_str(&format!(
+                        "{} ({} lines, {} symbols)\n",
+                        path.display(),
+                        node.line_count,
+                        node.symbols.len()
+                    ));
+                }
+            }
+            tree
+        }
+        _ => format!("Unknown tool: {}", tool_name),
+    }
+}
+
+fn send_json_line(writer: &mut io::StdoutLock, val: &serde_json::Value) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, val)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_resolve_safe_path_containment() {
+        let temp_dir = std::env::temp_dir().join(format!("layer_sec_test_{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let safe_subfile = temp_dir.join("safe.rs");
+        fs::write(&safe_subfile, "pub fn foo() {}").unwrap();
+
+        // 1. Valid relative path inside root
+        let res = resolve_safe_path(&temp_dir, "safe.rs");
+        assert!(res.is_ok(), "safe.rs should be allowed");
+        assert_eq!(res.unwrap(), PathBuf::from("safe.rs"));
+
+        // 2. Directory traversal attempt
+        let res_traversal = resolve_safe_path(&temp_dir, "../../etc/passwd");
+        assert!(res_traversal.is_err(), "Traversal outside root must fail");
+        assert!(res_traversal.unwrap_err().contains("outside workspace root"));
+
+        // 3. Absolute path outside root
+        let res_outside = resolve_safe_path(&temp_dir, "/etc/passwd");
+        assert!(res_outside.is_err(), "External absolute path must fail");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+
