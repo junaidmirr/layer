@@ -1,6 +1,5 @@
 
-![Image Description](https://i.ibb.co/C3WXFR6j/Layer-Smarter-Context-Faster-Agents.png)
-<img src="https://example.com/image.png" alt="Project Screenshot" width="500">
+<img src="https://i.ibb.co/yFFyLDcy/Layer-Smarter-Context-Faster-Agents-1.png" width="200" />
 
 
 [![CI](https://github.com/your-username/layer/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/layer/actions/workflows/ci.yml)
