@@ -137,13 +137,21 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "find_references",
-                            "description": "Finds all occurrences, usages, and references to a symbol across the entire codebase with line numbers and surrounding snippets.",
+                            "description": "Finds all occurrences, usages, and references to a symbol across the codebase. Set code_only=true to filter out documentation, markdown, and JSON schemas.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "symbol": {
                                         "type": "string",
                                         "description": "The function, class, or symbol name to look up"
+                                    },
+                                    "code_only": {
+                                        "type": "boolean",
+                                        "description": "Optional: If true, only returns references in code files (.rs, .ts, .py, etc.), ignoring docs and schemas."
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "Optional: Maximum references to return (default 60)"
                                     }
                                 },
                                 "required": ["symbol"]
@@ -151,13 +159,17 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "get_callers",
-                            "description": "PREFERRED over ripgrep/grep for finding callers. Instantly returns which functions, methods, or tests call this symbol, including enclosing caller names, file paths, line ranges, and call-site snippets without manual file reading.",
+                            "description": "PREFERRED over ripgrep for finding callers. Returns distinct caller functions and methods across the codebase, grouped by enclosing function with call counts and line ranges.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "symbol": {
                                         "type": "string",
                                         "description": "The function, class, or method name to find callers for"
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "Optional: Maximum distinct callers to return (default 25)"
                                     }
                                 },
                                 "required": ["symbol"]
@@ -429,15 +441,31 @@ fn execute_tool(
         }
         "find_references" => {
             let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            let refs = g.find_references(symbol);
+            let code_only = args.get("code_only").and_then(|c| c.as_bool()).unwrap_or(false);
+            let limit = args.get("limit").and_then(|l| l.as_u64()).map(|l| l as usize).unwrap_or(60);
+            let mut refs = g.find_references_filtered(symbol, code_only);
             if refs.is_empty() {
                 format!("No references found for symbol '{}'.", symbol)
             } else {
-                serde_json::to_string(&refs).unwrap_or_default()
+                let total_refs = refs.len();
+                let is_truncated = total_refs > limit;
+                if is_truncated {
+                    refs.truncate(limit);
+                    json!({
+                        "symbol": symbol,
+                        "total_found": total_refs,
+                        "returned": refs.len(),
+                        "is_truncated": true,
+                        "references": refs,
+                    }).to_string()
+                } else {
+                    serde_json::to_string(&refs).unwrap_or_default()
+                }
             }
         }
         "get_callers" => {
             let symbol = args.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            let limit = args.get("limit").and_then(|l| l.as_u64()).map(|l| l as usize).unwrap_or(25);
             let callers = g.get_callers(symbol);
             if callers.is_empty() {
                 serde_json::to_string(&json!({
@@ -448,7 +476,20 @@ fn execute_tool(
                     "note": "Zero direct callers found in workspace index. Do not assume symbol is completely unused if it is an exported API, virtual method, macro target, or called dynamically."
                 })).unwrap_or_default()
             } else {
-                serde_json::to_string(&callers).unwrap_or_default()
+                let total = callers.len();
+                let is_truncated = total > limit;
+                let list: Vec<_> = callers.into_iter().take(limit).collect();
+                if is_truncated {
+                    json!({
+                        "symbol": symbol,
+                        "total_distinct_callers": total,
+                        "returned": list.len(),
+                        "is_truncated": true,
+                        "callers": list,
+                    }).to_string()
+                } else {
+                    serde_json::to_string(&list).unwrap_or_default()
+                }
             }
         }
         "get_lines" => {

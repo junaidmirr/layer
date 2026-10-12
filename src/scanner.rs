@@ -10,6 +10,10 @@ static RUST_STRUCT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum|trait)\s+([a-zA-Z0-9_]+)").unwrap()
 });
 
+static RUST_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?type\s+([a-zA-Z0-9_]+)").unwrap()
+});
+
 static JS_TS_FN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^[ \t]*(?:export(?:\s+default)?\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(").unwrap()
 });
@@ -59,7 +63,8 @@ impl AstScanner {
             "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => Self::scan_javascript_typescript(&lines, &mut symbols),
             "py" | "pyw" => Self::scan_python(&lines, &mut symbols),
             "go" => Self::scan_go(&lines, &mut symbols),
-            _ => Self::scan_generic(&lines, &mut symbols),
+            "c" | "cpp" | "cxx" | "cc" | "h" | "hpp" | "hxx" | "java" | "kt" | "swift" | "cs" | "php" | "scala" | "dart" | "zig" => Self::scan_generic(&lines, &mut symbols),
+            _ => {}
         }
 
         // Sort by start_line
@@ -74,12 +79,18 @@ impl AstScanner {
             let trimmed = line.trim();
             match ext.as_str() {
                 "rs" => {
-                    if trimmed.starts_with("use ") || trimmed.starts_with("mod ") {
+                    let s = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+                    let s = s.strip_prefix("(crate) ").or_else(|| s.strip_prefix("(super) ")).unwrap_or(s);
+                    if s.starts_with("use ") || s.starts_with("mod ") {
                         imports.push(trimmed.trim_end_matches(';').to_string());
                     }
                 }
                 "js" | "jsx" | "ts" | "tsx" => {
-                    if trimmed.starts_with("import ") || (trimmed.contains("require(") && !trimmed.starts_with("//")) {
+                    if trimmed.starts_with("import ")
+                        || trimmed.starts_with("export {")
+                        || trimmed.starts_with("export * from")
+                        || (trimmed.contains("require(") && !trimmed.starts_with("//"))
+                    {
                         imports.push(trimmed.to_string());
                     }
                 }
@@ -130,6 +141,17 @@ impl AstScanner {
                         start_line: line_num,
                         end_line,
                         signature: line.trim().to_string(),
+                        doc_comment: find_doc_comment(lines, idx),
+                    });
+                }
+            } else if let Some(caps) = RUST_TYPE_RE.captures(line) {
+                if let Some(name_match) = caps.get(1) {
+                    symbols.push(Symbol {
+                        name: name_match.as_str().to_string(),
+                        kind: SymbolKind::TypeAlias,
+                        start_line: line_num,
+                        end_line: line_num,
+                        signature: line.trim().trim_end_matches(';').to_string(),
                         doc_comment: find_doc_comment(lines, idx),
                     });
                 }

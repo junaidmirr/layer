@@ -540,6 +540,11 @@ impl VectorGraph {
 
     /// Find all references / call-sites to a symbol across the codebase
     pub fn find_references(&self, symbol_name: &str) -> Vec<SymbolReference> {
+        self.find_references_filtered(symbol_name, false)
+    }
+
+    /// Find references with optional code-only filtering
+    pub fn find_references_filtered(&self, symbol_name: &str, code_only: bool) -> Vec<SymbolReference> {
         let mut references = Vec::new();
         if symbol_name.trim().is_empty() {
             return references;
@@ -548,6 +553,9 @@ impl VectorGraph {
         let suffix = format!("::{}", sym_lower);
 
         for (path, node) in &self.files {
+            if code_only && !is_code_file_node(node) {
+                continue;
+            }
             let path_str = path.display().to_string();
             for (idx, line) in node.content.lines().enumerate() {
                 let line_num = idx + 1;
@@ -587,17 +595,31 @@ impl VectorGraph {
                 }
             }
         }
+        // Prioritize definite code calls over approximate references
+        references.sort_by_key(|r| r.is_approximate);
         references
     }
 
-    /// Get all callers of a function or method across the codebase
+    /// Get all callers of a function or method across the codebase, grouped by enclosing symbol
     pub fn get_callers(&self, symbol_name: &str) -> Vec<CallerInfo> {
-        let refs = self.find_references(symbol_name);
-        let mut callers = Vec::new();
+        let refs = self.find_references_filtered(symbol_name, true);
+        let mut grouped: std::collections::HashMap<(String, String), (CallerInfo, usize, bool)> = std::collections::HashMap::new();
+        let mut order: Vec<(String, String)> = Vec::new();
 
         for r in refs {
-            if let Some(caller_name) = r.caller_symbol {
-                let file_path = PathBuf::from(&r.file);
+            let caller_name = r.caller_symbol.unwrap_or_else(|| "<module-level>".to_string());
+            let file = r.file;
+            let key = (file.clone(), caller_name.clone());
+
+            let is_approx = r.is_approximate;
+            if let Some((info, count, has_definite)) = grouped.get_mut(&key) {
+                *count += 1;
+                if !is_approx {
+                    *has_definite = true;
+                    info.is_approximate = false;
+                }
+            } else {
+                let file_path = PathBuf::from(&file);
                 let caller_lines = self
                     .files
                     .get(&file_path)
@@ -605,24 +627,28 @@ impl VectorGraph {
                     .map(|s| [s.start_line, s.end_line])
                     .unwrap_or([r.line, r.line]);
 
-                callers.push(CallerInfo {
+                let info = CallerInfo {
                     caller_symbol: caller_name,
-                    caller_file: r.file,
+                    caller_file: file,
                     caller_lines,
                     call_line: r.line,
                     call_snippet: r.text,
-                    is_approximate: r.is_approximate,
-                });
-            } else {
-                // Call outside a function (global/top-level script or module level)
-                callers.push(CallerInfo {
-                    caller_symbol: "<top-level>".to_string(),
-                    caller_file: r.file,
-                    caller_lines: [r.line, r.line],
-                    call_line: r.line,
-                    call_snippet: r.text,
-                    is_approximate: true,
-                });
+                    call_count: None,
+                    is_approximate: is_approx,
+                };
+                order.push(key.clone());
+                grouped.insert(key, (info, 1, !is_approx));
+            }
+        }
+
+        let mut callers = Vec::new();
+        for key in order {
+            if let Some((mut info, count, has_definite)) = grouped.remove(&key) {
+                if count > 1 {
+                    info.call_count = Some(count);
+                }
+                info.is_approximate = !has_definite;
+                callers.push(info);
             }
         }
         callers
@@ -994,6 +1020,32 @@ fn is_word_match(line: &str, word: &str) -> bool {
     false
 }
 
+/// Helper to distinguish code files from documentation, schemas, and assets
+fn is_code_file_node(node: &FileNode) -> bool {
+    let non_code_extensions = [
+        "md", "markdown", "json", "yaml", "yml", "toml", "txt", "csv", "xml", "html", "svg", "css", "scss", "changelog",
+    ];
+    if let Some(ref ext) = node.extension {
+        if non_code_extensions.contains(&ext.to_lowercase().as_str()) {
+            return false;
+        }
+    }
+    let code_extensions = [
+        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs",
+        "py", "pyw", "pyi",
+        "c", "cpp", "cxx", "cc", "h", "hpp", "hxx",
+        "go", "java", "kt", "kts", "swift", "rb",
+        "cs", "php", "scala", "dart", "zig", "lua",
+        "sh", "bash", "zsh",
+    ];
+    if let Some(ref ext) = node.extension {
+        if code_extensions.contains(&ext.to_lowercase().as_str()) {
+            return true;
+        }
+    }
+    !node.symbols.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1245,5 +1297,48 @@ mod tests {
 
         // State should remain v1, rejecting the stale older write
         assert_eq!(graph.files[&PathBuf::from("src/app.rs")].content_hash, 101);
+    }
+
+    #[test]
+    fn test_grouped_callers_with_count() {
+        let mut graph = VectorGraph::new();
+        // A function with multiple match arms calling the same symbol
+        let content = "fn to_tokens() {\n    match effect {\n        WindowEffect::A => 1,\n        WindowEffect::B => 2,\n        WindowEffect::C => 3,\n    }\n}\n";
+        let sym = Symbol {
+            name: "to_tokens".to_string(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            end_line: 7,
+            signature: "fn to_tokens()".to_string(),
+            doc_comment: None,
+        };
+        graph.upsert_file(make_test_node("src/config.rs", content, vec![sym]));
+
+        let callers = graph.get_callers("WindowEffect");
+        // Exactly 1 caller group for to_tokens instead of 3 duplicates
+        assert_eq!(callers.len(), 1);
+        let caller = &callers[0];
+        assert_eq!(caller.caller_symbol, "to_tokens");
+        assert_eq!(caller.caller_file, "src/config.rs");
+        assert_eq!(caller.call_count, Some(3));
+        assert_eq!(caller.caller_lines, [1, 7]);
+    }
+
+    #[test]
+    fn test_find_references_code_only() {
+        let mut graph = VectorGraph::new();
+        let code_node = make_test_node("src/lib.rs", "let effect = WindowEffect::Blur;", vec![]);
+        let mut doc_node = make_test_node("CHANGELOG.md", "# Release\nWindowEffect was modified.", vec![]);
+        doc_node.extension = Some("md".to_string());
+
+        graph.upsert_file(code_node);
+        graph.upsert_file(doc_node);
+
+        let all_refs = graph.find_references("WindowEffect");
+        assert_eq!(all_refs.len(), 2);
+
+        let code_refs = graph.find_references_filtered("WindowEffect", true);
+        assert_eq!(code_refs.len(), 1);
+        assert_eq!(code_refs[0].file, "src/lib.rs");
     }
 }

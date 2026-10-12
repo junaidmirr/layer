@@ -13,6 +13,7 @@ pub enum SymbolKind {
     Module,
     Constant,
     Variable,
+    TypeAlias,
     Unknown,
 }
 
@@ -29,6 +30,7 @@ impl std::fmt::Display for SymbolKind {
             SymbolKind::Module => write!(f, "mod"),
             SymbolKind::Constant => write!(f, "const"),
             SymbolKind::Variable => write!(f, "var"),
+            SymbolKind::TypeAlias => write!(f, "type"),
             SymbolKind::Unknown => write!(f, "symbol"),
         }
     }
@@ -67,6 +69,7 @@ pub struct SymbolReference {
     pub file: String,
     pub line: usize,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_symbol: Option<String>,
     pub is_approximate: bool,
 }
@@ -78,6 +81,8 @@ pub struct CallerInfo {
     pub caller_lines: [usize; 2],
     pub call_line: usize,
     pub call_snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_count: Option<usize>,
     pub is_approximate: bool,
 }
 
