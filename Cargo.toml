@@ -5,6 +5,7 @@ edition = "2024"
 description = "High-performance AST code intelligence and Model Context Protocol (MCP) server for AI coding agents"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/junaidmirr/layer"
 keywords = ["mcp", "code-intelligence", "ast", "context-engine", "ai-agents"]
 categories = ["command-line-utilities", "development-tools"]
 
