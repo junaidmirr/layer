@@ -4,6 +4,7 @@ use crate::models::{
     CallerInfo, FileChunk, FileNode, FileSkeleton, ImpactRadius, SearchHit, Symbol,
     SymbolBodyResult, SymbolKind, SymbolReference, SymbolSkeleton,
 };
+use crate::scanner::AstScanner;
 use crate::walker::CodebaseScanner;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -583,18 +584,22 @@ impl VectorGraph {
             if code_only && !is_code_file_node(node) {
                 continue;
             }
+            if !node.content.contains(symbol_name) {
+                continue;
+            }
             let path_str = path.display().to_string();
-            for (idx, line) in node.content.lines().enumerate() {
-                let line_num = idx + 1;
-                if is_word_match(line, symbol_name) {
-                    // Pick the most specific enclosing symbol (smallest line span)
+
+            if let Some(ast_usages) =
+                AstScanner::find_ast_usages(&node.content, node.extension.as_deref(), symbol_name)
+            {
+                for usage in ast_usages {
+                    let line_num = usage.line;
                     let caller = node
                         .symbols
                         .iter()
                         .filter(|s| line_num >= s.start_line && line_num <= s.end_line)
                         .min_by_key(|s| s.end_line.saturating_sub(s.start_line));
 
-                    // Avoid classifying the symbol's own definition or references inside its own definition
                     let is_inside_target_def = node.symbols.iter().any(|s| {
                         let n_lower = s.name.to_lowercase();
                         (n_lower == sym_lower || n_lower.ends_with(&suffix))
@@ -609,15 +614,54 @@ impl VectorGraph {
                     });
 
                     if !is_def && !is_inside_target_def {
-                        let is_call = is_direct_call_or_construction(line, symbol_name);
+                        let is_call = usage.is_definite_code_call_or_ref
+                            || is_direct_call_or_construction(&usage.line_text, symbol_name);
 
                         references.push(SymbolReference {
                             file: path_str.clone(),
                             line: line_num,
-                            text: line.trim().to_string(),
+                            text: usage.line_text,
                             caller_symbol: caller.map(|c| c.name.clone()),
                             is_approximate: !is_call,
                         });
+                    }
+                }
+            } else {
+                for (idx, line) in node.content.lines().enumerate() {
+                    let line_num = idx + 1;
+                    if is_word_match(line, symbol_name) {
+                        // Pick the most specific enclosing symbol (smallest line span)
+                        let caller = node
+                            .symbols
+                            .iter()
+                            .filter(|s| line_num >= s.start_line && line_num <= s.end_line)
+                            .min_by_key(|s| s.end_line.saturating_sub(s.start_line));
+
+                        // Avoid classifying the symbol's own definition or references inside its own definition
+                        let is_inside_target_def = node.symbols.iter().any(|s| {
+                            let n_lower = s.name.to_lowercase();
+                            (n_lower == sym_lower || n_lower.ends_with(&suffix))
+                                && line_num >= s.start_line
+                                && line_num <= s.end_line
+                        });
+
+                        let is_def = caller.is_some_and(|c| {
+                            let c_lower = c.name.to_lowercase();
+                            (c_lower == sym_lower || c_lower.ends_with(&suffix))
+                                && (c.start_line == line_num || c.signature.contains(symbol_name))
+                        });
+
+                        if !is_def && !is_inside_target_def {
+                            let is_call = is_direct_call_or_construction(line, symbol_name);
+
+                            references.push(SymbolReference {
+                                file: path_str.clone(),
+                                line: line_num,
+                                text: line.trim().to_string(),
+                                caller_symbol: caller.map(|c| c.name.clone()),
+                                is_approximate: !is_call,
+                            });
+                        }
                     }
                 }
             }

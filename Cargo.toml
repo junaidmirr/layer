@@ -26,7 +26,13 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 axum = { version = "0.8", optional = true }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
-tree-sitter = { version = "0.25", optional = true }
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-cpp = "0.23.4"
 
 [features]
 default = []
