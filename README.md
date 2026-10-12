@@ -114,24 +114,23 @@ layer --version
 
 ---
 
-## 📊 Empirical Benchmarks on Tauri (856 Files, 100k+ LoC)
+## 📊 Empirical Benchmarks Across Codebases
 
-Evaluating `layer` against standard developer tools (`ripgrep 15.2.0`, `sed`, `cat`) on the official [Tauri codebase](https://github.com/tauri-apps/tauri):
+Layer has been tested in head-to-head comparisons against standard agent tooling (`grep`, `cat`, `ripgrep 15.2.0`) across real-world C++, Rust, and TypeScript codebases:
 
-### 1. Structural Exploration & Refactoring Analysis
-Where whole-file reads or broad regex passes flood the LLM's context:
+| Codebase & Stack | Scope & Task | Baseline | Layer | Net Impact |
+| :--- | :--- | :--- | :--- | :--- |
+| **Creo** (C++17 / Qt) | Symbol retrieval & call-site discovery | 18,400 tokens / 14 calls | **3,100 tokens / 6 calls** | **-83.2% tokens**, 100% CTest pass |
+| **Creo UI** (React 18 / TS) | Refactor monolithic 2,000-line `App.tsx` | ~35,000 tokens (3 reads) | **3,148 tokens / 9 calls** | **-91.0% tokens**, 0 full-file reads |
+| **Claude Code** (Sonnet 3.5) | 6-task cumulative agent development | $1.28 / 42 requests / 5m 48s | **$0.47 / 19 requests / 2m 13s** | **-63% cost**, **-55% turns**, **-62% time** |
+| **Tauri** (Rust, 856 files) | 10-task suite vs `ripgrep 15.2` | 9,333 tokens / 15 calls | **4,091 tokens / 10 calls** | **+56.2% net tokens**, 100% precision |
+| **Tauri** (IPC Security Audit) | Autonomous unprompted agent audit | ~28,000 tokens (cat/grep) | **~3,500 tokens (11 calls)** | **~87% token reduction**, 100% accuracy |
 
-| Task | Baseline (`rg` / `cat`) | Layer MCP Tool | Layer Tokens | Baseline Tokens | Savings |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Trace `WindowEffect` callers** | `rg` across crates | `get_callers` | **288** | 2,739 | **+89.5% Leaner** |
-| **Inspect `on_message` dispatch logic** | `cat webview/mod.rs` | `get_symbol_body` | **310** | 9,140 | **+96.6% Leaner** |
-| **Explore `protocol.rs` structure** | `cat protocol.rs` | `get_file_skeleton` | **540** | 4,200 | **+87.1% Leaner** |
-| **Dead Code Audit (`normalize_...`)** | `rg` (1 call) | `find_references` | **334** | 428 | **+22.0% Leaner** |
-| **Runtime Dispatch Search** | `rg` (multi-crate) | `search` | **338** | 1,626 | **+79.2% Leaner** |
+### The Hybrid Principle
+* **Literal Regex & Path Globbing**: Native `grep` / `glob` remains optimal for unindexed literal string sweeps.
+* **Relational Code Intelligence**: `layer_*` saves **70%–90% of tokens** whenever finding callers, inspecting function bodies, checking impact radius, or mapping dependencies.
 
-### 2. The Hybrid Principle (When to Use What)
-- **Literal String / Path Regex**: Native `grep` / `glob` remains unbeatable for unindexed literal string sweeps.
-- **Structural Code Intelligence**: `layer_*` saves **70–90% of tokens** when finding who calls a symbol, inspecting a function body, tracing cross-crate impact, or mapping dependencies.
+👉 *See [`BENCHMARKS.md`](BENCHMARKS.md) for the complete task logs, recall tables, and methodology.*
 
 ---
 
