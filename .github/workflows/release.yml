@@ -27,7 +27,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bin: layer
             archive: layer-x86_64-unknown-linux-gnu.tar.gz
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
             bin: layer
             archive: layer-aarch64-apple-darwin.tar.gz
