@@ -500,6 +500,8 @@ fn execute_tool(
                         "total_found": total_found,
                         "returned": list.len(),
                         "is_truncated": true,
+                        "omitted_count": total_found.saturating_sub(list.len()),
+                        "next_query_hint": format!("Generic symbol with {} declarations. Narrow down with file='<crate_or_path>' (e.g. file='crates/tauri') or pass limit={}", total_found, total_found),
                         "matches": list,
                     })
                     .to_string()
@@ -532,6 +534,8 @@ fn execute_tool(
                         "total_found": total_refs,
                         "returned": refs.len(),
                         "is_truncated": true,
+                        "omitted_count": total_refs.saturating_sub(refs.len()),
+                        "next_query_hint": format!("To view all {} references, increase limit={} or set code_only=true", total_refs, total_refs),
                         "references": refs,
                     })
                     .to_string()
@@ -566,6 +570,8 @@ fn execute_tool(
                         "total_distinct_callers": total,
                         "returned": list.len(),
                         "is_truncated": true,
+                        "omitted_callers_count": total.saturating_sub(list.len()),
+                        "next_query_hint": format!("To view all {} callers without omission, pass limit={} or use find_references(symbol='{}', code_only=true)", total, total, symbol),
                         "callers": list,
                     })
                     .to_string()

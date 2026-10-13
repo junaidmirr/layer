@@ -615,9 +615,21 @@ impl VectorGraph {
                 lines: [s.start_line, s.end_line],
                 signature: s.signature.clone(),
                 doc: s.doc_comment.as_ref().and_then(|d| {
-                    d.lines()
-                        .find(|l| !l.trim().is_empty())
-                        .map(|l| l.trim().to_string())
+                    let mut lines = Vec::new();
+                    for line in d.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() && !lines.is_empty() {
+                            break;
+                        }
+                        if !trimmed.is_empty() && lines.len() < 3 {
+                            lines.push(trimmed);
+                        }
+                    }
+                    if lines.is_empty() {
+                        None
+                    } else {
+                        Some(lines.join(" "))
+                    }
                 }),
             })
             .collect();
@@ -837,7 +849,7 @@ impl VectorGraph {
         symbol_name: &str,
         file_hint: Option<&Path>,
     ) -> Option<SymbolBodyResult> {
-        self.get_symbol_body_opt(symbol_name, file_hint, 400)
+        self.get_symbol_body_opt(symbol_name, file_hint, 160)
     }
 
     /// Retrieve the exact code implementation of a symbol with custom line limit
@@ -900,17 +912,28 @@ impl VectorGraph {
         let end = chosen_sym.end_line.min(lines.len());
 
         let line_count = end.saturating_sub(start);
-        let (body, is_truncated) = if line_count > max_lines {
+        let returned_count = line_count.min(max_lines);
+        let (body, is_truncated, next_query_hint) = if line_count > max_lines {
             let mut truncated = lines[start..start + max_lines].join("\n");
+            let remaining = line_count - max_lines;
             truncated.push_str(&format!(
-                "\n// ... [truncated {} lines; use get_lines for full body]",
-                line_count - max_lines
+                "\n// ... [truncated {} lines; use max_lines={} or get_lines to view full body]",
+                remaining, line_count
             ));
-            (truncated, true)
+            let hint = format!(
+                "Symbol body truncated at line {} of {}. Pass max_lines={} to retrieve complete body, or call get_lines(path='{}', start={}, end={}) for remaining lines.",
+                max_lines,
+                line_count,
+                line_count,
+                chosen_path.display(),
+                chosen_sym.start_line + max_lines,
+                chosen_sym.end_line
+            );
+            (truncated, true, Some(hint))
         } else if start < end {
-            (lines[start..end].join("\n"), false)
+            (lines[start..end].join("\n"), false, None)
         } else {
-            (chosen_sym.signature.clone(), false)
+            (chosen_sym.signature.clone(), false, None)
         };
 
         Some(SymbolBodyResult {
@@ -919,7 +942,10 @@ impl VectorGraph {
             lines: [chosen_sym.start_line, chosen_sym.end_line],
             signature: chosen_sym.signature.clone(),
             body,
+            total_lines: line_count,
+            returned_lines: returned_count,
             is_truncated,
+            next_query_hint,
             candidates,
         })
     }

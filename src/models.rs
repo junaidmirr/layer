@@ -93,8 +93,11 @@ pub struct SymbolBodyResult {
     pub lines: [usize; 2],
     pub signature: String,
     pub body: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub total_lines: usize,
+    pub returned_lines: usize,
     pub is_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_query_hint: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<String>, // Alternative file locations if ambiguous
 }
