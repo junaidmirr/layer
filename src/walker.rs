@@ -17,7 +17,6 @@ impl CodebaseScanner {
 
     /// Recursively scan codebase respecting .gitignore and binary file boundaries
     pub fn scan_all(&self) -> Vec<FileNode> {
-        let mut results = Vec::new();
         let walker = WalkBuilder::new(&self.root_path)
             .hidden(true) // skip hidden (.git, etc.)
             .git_ignore(true)
@@ -25,14 +24,40 @@ impl CodebaseScanner {
             .git_exclude(true)
             .build();
 
-        for entry in walker.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_file()
-                && let Some(file_node) = self.scan_file(path)
-            {
-                results.push(file_node);
-            }
+        let paths: Vec<PathBuf> = walker
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_file())
+            .map(|e| e.into_path())
+            .collect();
+
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1);
+
+        if paths.len() < 16 || num_threads <= 1 {
+            return paths.iter().filter_map(|p| self.scan_file(p)).collect();
         }
+
+        let chunk_size = paths.len().div_ceil(num_threads);
+        let mut results = Vec::with_capacity(paths.len());
+
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(num_threads);
+            for chunk in paths.chunks(chunk_size) {
+                handles.push(s.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|p| self.scan_file(p))
+                        .collect::<Vec<FileNode>>()
+                }));
+            }
+            for handle in handles {
+                if let Ok(mut part) = handle.join() {
+                    results.append(&mut part);
+                }
+            }
+        });
 
         results
     }
@@ -66,8 +91,8 @@ impl CodebaseScanner {
             .map(|s| s.to_string());
 
         let line_count = content.lines().count();
-        let symbols = AstScanner::extract_symbols(&content, extension.as_deref());
-        let imports = AstScanner::extract_imports(&content, extension.as_deref());
+        let (symbols, imports) =
+            AstScanner::extract_symbols_and_imports(&content, extension.as_deref());
 
         // Fast 64-bit FNV-1a content hash for deterministic version verification
         let mut hasher = 0xcbf29ce484222325u64;

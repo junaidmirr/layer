@@ -584,7 +584,7 @@ impl VectorGraph {
             if code_only && !is_code_file_node(node) {
                 continue;
             }
-            if !node.content.contains(symbol_name) {
+            if !node.content.contains(symbol_name) || !is_word_match(&node.content, symbol_name) {
                 continue;
             }
             let path_str = path.display().to_string();
@@ -899,7 +899,8 @@ impl VectorGraph {
                             }
 
                             // Check if other_s.name is called inside the body
-                            if is_callee_call(&body_text, &other_s.name)
+                            if body_text.contains(other_s.name.as_str())
+                                && is_callee_call(&body_text, &other_s.name)
                                 && !callees.contains(&other_s.name)
                             {
                                 callees.push(other_s.name.clone());

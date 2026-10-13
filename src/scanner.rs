@@ -40,30 +40,28 @@ impl AstScanner {
         }
     }
 
-    /// Extract symbols using Tree-sitter Concrete Syntax Trees (CST/AST),
-    /// falling back to block-scoped lexical heuristics only for unsupported extensions.
-    pub fn extract_symbols(content: &str, extension: Option<&str>) -> Vec<Symbol> {
+    /// Single-pass extraction of both symbols and imports from a single Tree-sitter CST parse.
+    pub fn extract_symbols_and_imports(
+        content: &str,
+        extension: Option<&str>,
+    ) -> (Vec<Symbol>, Vec<String>) {
         let ext = extension.unwrap_or("").to_lowercase();
         let mut symbols = Vec::new();
+        let mut imports = Vec::new();
 
         if let Some(lang) = Self::get_language(Some(&ext))
             && let Some(tree) = Self::parse_tree(content, &lang)
         {
             let lines: Vec<&str> = content.lines().collect();
-            Self::walk_ast_symbols(
-                tree.root_node(),
-                content.as_bytes(),
-                &lines,
-                &ext,
-                false,
-                &mut symbols,
-            );
+            let root = tree.root_node();
+            Self::walk_ast_symbols(root, content.as_bytes(), &lines, &ext, false, &mut symbols);
             symbols.sort_by_key(|s| (s.start_line, s.end_line));
             symbols.dedup_by(|a, b| a.name == b.name && a.start_line == b.start_line);
-            return symbols;
+
+            Self::walk_ast_imports(root, content.as_bytes(), &ext, &mut imports);
+            return (symbols, imports);
         }
 
-        // Fallback for Tier-2 OOP languages without embedded Tree-sitter C grammars
         let lines: Vec<&str> = content.lines().collect();
         if matches!(
             ext.as_str(),
@@ -71,31 +69,27 @@ impl AstScanner {
         ) {
             Self::scan_fallback_oop(&lines, &mut symbols);
         }
-
         symbols.sort_by_key(|s| s.start_line);
-        symbols
-    }
 
-    /// Extract module imports, includes, and re-exports via Tree-sitter AST nodes
-    pub fn extract_imports(content: &str, extension: Option<&str>) -> Vec<String> {
-        let ext = extension.unwrap_or("").to_lowercase();
-        let mut imports = Vec::new();
-
-        if let Some(lang) = Self::get_language(Some(&ext))
-            && let Some(tree) = Self::parse_tree(content, &lang)
-        {
-            Self::walk_ast_imports(tree.root_node(), content.as_bytes(), &ext, &mut imports);
-            return imports;
-        }
-
-        // Fallback import extraction for other languages
-        for line in content.lines() {
+        for line in &lines {
             let trimmed = line.trim();
             if trimmed.starts_with("import ") || trimmed.starts_with("using ") {
                 imports.push(trimmed.trim_end_matches(';').to_string());
             }
         }
-        imports
+
+        (symbols, imports)
+    }
+
+    /// Extract symbols using Tree-sitter Concrete Syntax Trees (CST/AST),
+    /// falling back to block-scoped lexical heuristics only for unsupported extensions.
+    pub fn extract_symbols(content: &str, extension: Option<&str>) -> Vec<Symbol> {
+        Self::extract_symbols_and_imports(content, extension).0
+    }
+
+    /// Extract module imports, includes, and re-exports via Tree-sitter AST nodes
+    pub fn extract_imports(content: &str, extension: Option<&str>) -> Vec<String> {
+        Self::extract_symbols_and_imports(content, extension).1
     }
 
     /// AST-verified symbol reference finder.
@@ -187,6 +181,44 @@ impl AstScanner {
                 "const_item" | "static_item" => {
                     if let Some(name) = Self::node_field_text(node, "name", source) {
                         Self::push_ast_symbol(node, lines, name, SymbolKind::Constant, symbols);
+                    }
+                }
+                "macro_invocation" => {
+                    // Declarative macros (e.g. `unstable_struct!( struct Foo { ... } )` or `cfg_block!`)
+                    // wrap valid Rust item definitions inside a `token_tree`. Re-parse the inner token
+                    // stream with Tree-sitter when it contains item keywords.
+                    let mut cursor = node.walk();
+                    for child in node.children(&mut cursor) {
+                        if child.kind() == "token_tree"
+                            && let Ok(raw) = child.utf8_text(source)
+                            && raw.len() > 2
+                            && (raw.contains("struct ")
+                                || raw.contains("enum ")
+                                || raw.contains("trait ")
+                                || raw.contains("fn "))
+                        {
+                            let inner = &raw[1..raw.len() - 1];
+                            if let Some(lang) = Self::get_language(Some("rs"))
+                                && let Some(sub_tree) = Self::parse_tree(inner, &lang)
+                            {
+                                let inner_lines: Vec<&str> = inner.lines().collect();
+                                let mut sub_syms = Vec::new();
+                                Self::walk_ast_symbols(
+                                    sub_tree.root_node(),
+                                    inner.as_bytes(),
+                                    &inner_lines,
+                                    "rs",
+                                    in_container,
+                                    &mut sub_syms,
+                                );
+                                let row_offset = child.start_position().row;
+                                for mut sym in sub_syms {
+                                    sym.start_line += row_offset;
+                                    sym.end_line += row_offset;
+                                    symbols.push(sym);
+                                }
+                            }
+                        }
                     }
                 }
                 _ => {}
