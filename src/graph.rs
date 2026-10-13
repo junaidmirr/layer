@@ -33,6 +33,19 @@ impl Default for VectorGraph {
     }
 }
 
+/// Truncate a UTF-8 string to at most `max_bytes` without slicing inside a multi-byte codepoint.
+pub fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        s
+    } else {
+        let mut end = max_bytes;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+}
+
 impl VectorGraph {
     pub fn new() -> Self {
         Self {
@@ -583,7 +596,7 @@ impl VectorGraph {
                 result.push_str(&format!(
                     "{:4} | {}... [line truncated at 1000 chars]\n",
                     actual_line,
-                    &line[..1000]
+                    safe_truncate_str(line, 1000)
                 ));
             } else {
                 result.push_str(&format!("{:4} | {}\n", actual_line, line));
@@ -1004,7 +1017,7 @@ impl VectorGraph {
             let joined = lines[start..end].join("\n");
             let max_total_bytes = 32 * 1024;
             if joined.len() > max_total_bytes {
-                let mut truncated = joined[..max_total_bytes].to_string();
+                let mut truncated = safe_truncate_str(&joined, max_total_bytes).to_string();
                 truncated.push_str(
                     "\n// ... [truncated: exceeded 32KB byte limit. Inspect smaller fragments with get_lines]",
                 );
@@ -1747,5 +1760,100 @@ mod tests {
         let code_refs = graph.find_references_filtered("WindowEffect", true);
         assert_eq!(code_refs.len(), 1);
         assert_eq!(code_refs[0].file, "src/lib.rs");
+    }
+
+    #[test]
+    fn test_safe_truncate_str_utf8() {
+        // Multi-byte CJK (3 bytes each: 🦀 is 4 bytes, 你 is 3 bytes, 好 is 3 bytes)
+        let s = "你好世界🦀test";
+        // "你" = bytes 0..3, "好" = bytes 3..6, "世" = bytes 6..9, "界" = bytes 9..12, "🦀" = bytes 12..16
+        // Capping at 5 bytes should truncate to 3 bytes ("你") without panicking
+        assert_eq!(safe_truncate_str(s, 5), "你");
+        assert_eq!(safe_truncate_str(s, 6), "你好");
+        // Capping at 14 bytes (middle of 4-byte 🦀) should safely stop before 🦀
+        assert_eq!(safe_truncate_str(s, 14), "你好世界");
+        assert_eq!(safe_truncate_str(s, 16), "你好世界🦀");
+        assert_eq!(safe_truncate_str(s, 100), s);
+    }
+
+    #[test]
+    fn test_chunk_exact_reconstruction() {
+        let mut graph = VectorGraph::new();
+        let lines: Vec<String> = (1..=20).map(|i| format!("    line_{};", i)).collect();
+        let content = format!("fn big_func() {{\n{}\n}}\n", lines.join("\n"));
+        let sym = Symbol {
+            name: "big_func".to_string(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            end_line: 22,
+            signature: "fn big_func()".to_string(),
+            doc_comment: None,
+        };
+        graph.upsert_file(make_test_node("src/lib.rs", &content, vec![sym]));
+
+        // Retrieve with max_lines = 10
+        let res = graph.get_symbol_body_opt("big_func", Some(Path::new("src/lib.rs")), 10);
+        assert!(res.is_some());
+        let chunk1 = res.unwrap();
+        assert!(chunk1.is_truncated);
+        assert_eq!(chunk1.returned_lines, 10);
+        assert_eq!(chunk1.total_lines, 22);
+
+        // Parse hint to verify exact start and end lines
+        let hint = chunk1.next_query_hint.expect("hint must exist");
+        assert!(hint.contains("start=11, end=22"));
+
+        // Get remainder using get_file_lines(start=11, end=22)
+        let remainder = graph.get_file_lines(Path::new("src/lib.rs"), 11, 22).unwrap();
+        let remainder_lines: Vec<&str> = remainder
+            .lines()
+            .map(|l| {
+                if let Some((_, code)) = l.split_once('|') {
+                    code.strip_prefix(' ').unwrap_or(code)
+                } else {
+                    l
+                }
+            })
+            .collect();
+
+        // Verify chunk1 returned lines + remainder lines match original content lines exactly
+        let chunk1_code_lines: Vec<&str> = chunk1.body.lines().take(chunk1.returned_lines).collect();
+        let combined: Vec<&str> = chunk1_code_lines.into_iter().chain(remainder_lines).collect();
+        let original_lines: Vec<&str> = content.lines().collect();
+        assert_eq!(combined, original_lines);
+    }
+
+    #[test]
+    fn test_deterministic_relevance_ranking() {
+        let mut graph = VectorGraph::new();
+        // Mock symbol in test file
+        let sym_mock = Symbol {
+            name: "run".to_string(),
+            kind: SymbolKind::Method,
+            start_line: 10,
+            end_line: 20,
+            signature: "fn run(&self)".to_string(),
+            doc_comment: None,
+        };
+        graph.upsert_file(make_test_node("tests/mocks/app_mock.rs", "fn run() {}", vec![sym_mock]));
+
+        // Real entry point in lib.rs
+        let sym_real = Symbol {
+            name: "run".to_string(),
+            kind: SymbolKind::Function,
+            start_line: 5,
+            end_line: 15,
+            signature: "pub fn run()".to_string(),
+            doc_comment: None,
+        };
+        graph.upsert_file(make_test_node("src/lib.rs", "pub fn run() {}", vec![sym_real]));
+
+        let matches = graph.find_symbol_filtered("run", None, Some(5));
+        assert_eq!(matches.len(), 2);
+        // The real entry point in src/lib.rs must be ranked #1
+        assert_eq!(matches[0].0, PathBuf::from("src/lib.rs"));
+        assert_eq!(matches[0].1.name, "run");
+        // The test mock must be demoted to #2
+        assert_eq!(matches[1].0, PathBuf::from("tests/mocks/app_mock.rs"));
     }
 }
