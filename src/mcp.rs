@@ -134,13 +134,21 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "find_symbol",
-                            "description": "PREFERRED over grep for symbol definitions. Finds exact declarations and definitions of a function, class, or struct across all files with line ranges and doc comments.",
+                            "description": "PREFERRED over grep for symbol declarations. Finds exact definitions of a function, class, or struct. For common names ('run', 'new'), pass 'file' or 'limit' to avoid broad lists.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "name": {
                                         "type": "string",
                                         "description": "Exact or partial symbol name (e.g., 'TimelineView', 'InsertClipCommand')"
+                                    },
+                                    "file": {
+                                        "type": "string",
+                                        "description": "Optional file path hint to narrow down search"
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "Optional maximum results to return (default: 15)"
                                     }
                                 },
                                 "required": ["name"]
@@ -239,6 +247,10 @@ fn handle_rpc_method(
                                     "file": {
                                         "type": "string",
                                         "description": "Optional file path hint to disambiguate identical symbol names"
+                                    },
+                                    "max_lines": {
+                                        "type": "integer",
+                                        "description": "Optional maximum lines to return before truncation (default: 400)"
                                     }
                                 },
                                 "required": ["name"]
@@ -264,10 +276,23 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "get_tree",
-                            "description": "Returns a compact plain text overview of files in the project with symbol counts.",
+                            "description": "Returns a compact directory overview with symbol counts. In large repositories or monorepos, specify 'path' or 'max_depth' to inspect specific subdirectories and avoid context bloat.",
                             "inputSchema": {
                                 "type": "object",
-                                "properties": {}
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Optional relative subdirectory path to inspect (e.g., 'crates/tauri' or 'src')"
+                                    },
+                                    "max_depth": {
+                                        "type": "integer",
+                                        "description": "Optional maximum depth of folder hierarchy (default: 2)"
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "Optional maximum files to return (default: 50)"
+                                    }
+                                }
                             }
                         }
                     ]
@@ -443,12 +468,21 @@ fn execute_tool(
         }
         "find_symbol" => {
             let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let hits = g.find_symbol(name);
-            if hits.is_empty() {
+            let file_hint = args.get("file").and_then(|f| f.as_str()).map(Path::new);
+            let limit = args
+                .get("limit")
+                .and_then(|l| l.as_u64())
+                .map(|l| l as usize)
+                .unwrap_or(15);
+            let all_hits = g.find_symbol_filtered(name, file_hint, None);
+            if all_hits.is_empty() {
                 format!("Symbol '{}' not found in codebase.", name)
             } else {
-                let list: Vec<_> = hits
-                    .iter()
+                let total_found = all_hits.len();
+                let is_truncated = total_found > limit;
+                let list: Vec<_> = all_hits
+                    .into_iter()
+                    .take(limit)
                     .map(|(p, s)| {
                         json!({
                             "file": p.display().to_string(),
@@ -460,7 +494,18 @@ fn execute_tool(
                         })
                     })
                     .collect();
-                serde_json::to_string(&list).unwrap_or_default()
+                if is_truncated {
+                    json!({
+                        "symbol": name,
+                        "total_found": total_found,
+                        "returned": list.len(),
+                        "is_truncated": true,
+                        "matches": list,
+                    })
+                    .to_string()
+                } else {
+                    serde_json::to_string(&list).unwrap_or_default()
+                }
             }
         }
         "find_references" => {
@@ -603,7 +648,12 @@ fn execute_tool(
                 .get("file")
                 .and_then(|f| f.as_str())
                 .and_then(|f_str| resolve_safe_path(root, f_str).ok());
-            match g.get_symbol_body(name, file_hint.as_deref()) {
+            let max_lines = args
+                .get("max_lines")
+                .and_then(|m| m.as_u64())
+                .map(|m| m as usize)
+                .unwrap_or(400);
+            match g.get_symbol_body_opt(name, file_hint.as_deref(), max_lines) {
                 Some(body) => serde_json::to_string(&body).unwrap_or_default(),
                 None => format!("Symbol '{}' not found in codebase.", name),
             }
@@ -618,19 +668,17 @@ fn execute_tool(
             serde_json::to_string(&impact).unwrap_or_default()
         }
         "get_tree" => {
-            // Strip formatting tokens for maximum efficiency
-            let mut tree = String::new();
-            for path in g.list_files() {
-                if let Some(node) = g.files.get(&path) {
-                    tree.push_str(&format!(
-                        "{} ({} lines, {} symbols)\n",
-                        path.display(),
-                        node.line_count,
-                        node.symbols.len()
-                    ));
-                }
-            }
-            tree
+            let path_str = args.get("path").and_then(|p| p.as_str());
+            let max_depth = args
+                .get("max_depth")
+                .and_then(|d| d.as_u64())
+                .map(|d| d as usize);
+            let limit = args
+                .get("limit")
+                .and_then(|l| l.as_u64())
+                .map(|l| l as usize);
+            let path_buf = path_str.map(PathBuf::from);
+            g.format_compact_tree(path_buf.as_deref(), max_depth, limit)
         }
         _ => format!("Unknown tool: {}", tool_name),
     }

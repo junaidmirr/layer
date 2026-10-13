@@ -458,6 +458,86 @@ impl VectorGraph {
         output
     }
 
+    /// Render compact directory tree structure filtered by path, max_depth, and limit
+    pub fn format_compact_tree(
+        &self,
+        path_filter: Option<&Path>,
+        max_depth: Option<usize>,
+        limit: Option<usize>,
+    ) -> String {
+        if self.files.is_empty() {
+            return "Codebase is empty or no files indexed yet.".to_string();
+        }
+
+        let max_d = max_depth.unwrap_or(2);
+        let max_items = limit.unwrap_or(50);
+        let mut sorted_paths = self.list_files();
+        sorted_paths.sort();
+
+        let prefix_str = path_filter
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let prefix_clean = prefix_str.trim_matches('/');
+
+        let mut lines = Vec::new();
+        let mut total_matching = 0;
+        let mut directories_seen = std::collections::HashSet::new();
+
+        for path in &sorted_paths {
+            let path_str = path.to_string_lossy();
+            if !prefix_clean.is_empty() && !path_str.starts_with(prefix_clean) {
+                continue;
+            }
+
+            total_matching += 1;
+            if let Some(parent) = path.parent() {
+                directories_seen.insert(parent.to_path_buf());
+            }
+
+            // Check depth relative to prefix
+            let rel_str = if prefix_clean.is_empty() {
+                path_str.as_ref()
+            } else {
+                path_str
+                    .strip_prefix(prefix_clean)
+                    .unwrap_or(path_str.as_ref())
+                    .trim_start_matches('/')
+            };
+
+            let depth = rel_str.split('/').count();
+            if depth > max_d {
+                continue;
+            }
+
+            if lines.len() < max_items
+                && let Some(node) = self.files.get(path)
+            {
+                lines.push(format!(
+                    "{} ({} lines, {} symbols)",
+                    path.display(),
+                    node.line_count,
+                    node.symbols.len()
+                ));
+            }
+        }
+
+        let mut output = lines.join("\n");
+        if total_matching > lines.len() {
+            output.push_str(&format!(
+                "\n... [Showing {} of {} matching files across {} directories. Use 'path' parameter to inspect specific subdirectories]",
+                lines.len(),
+                total_matching,
+                directories_seen.len()
+            ));
+        }
+
+        if output.is_empty() {
+            format!("No files found matching path '{}'.", prefix_clean)
+        } else {
+            output
+        }
+    }
+
     /// Get exact file content
     pub fn get_file_content(&self, path: &Path) -> Option<&str> {
         self.files.get(path).map(|node| node.content.as_str())
@@ -534,7 +614,11 @@ impl VectorGraph {
                 kind: s.kind.to_string(),
                 lines: [s.start_line, s.end_line],
                 signature: s.signature.clone(),
-                doc: s.doc_comment.clone(),
+                doc: s.doc_comment.as_ref().and_then(|d| {
+                    d.lines()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                }),
             })
             .collect();
 
@@ -548,16 +632,35 @@ impl VectorGraph {
 
     /// Find symbol definition(s) across the entire codebase
     pub fn find_symbol(&self, symbol_name: &str) -> Vec<(PathBuf, Symbol)> {
+        self.find_symbol_filtered(symbol_name, None, None)
+    }
+
+    /// Find symbol definitions with optional file path filter and limit
+    pub fn find_symbol_filtered(
+        &self,
+        symbol_name: &str,
+        file_hint: Option<&Path>,
+        limit: Option<usize>,
+    ) -> Vec<(PathBuf, Symbol)> {
         let mut results = Vec::new();
         let sym_lower = symbol_name.to_lowercase();
         let suffix = format!("::{}", sym_lower);
         for (path, node) in &self.files {
+            if let Some(hint) = file_hint
+                && path != hint
+                && !path.ends_with(hint)
+            {
+                continue;
+            }
             for sym in &node.symbols {
                 let name_lower = sym.name.to_lowercase();
                 if name_lower == sym_lower || name_lower.ends_with(&suffix) {
                     results.push((path.clone(), sym.clone()));
                 }
             }
+        }
+        if let Some(lim) = limit {
+            results.truncate(lim);
         }
         results
     }
@@ -734,6 +837,16 @@ impl VectorGraph {
         symbol_name: &str,
         file_hint: Option<&Path>,
     ) -> Option<SymbolBodyResult> {
+        self.get_symbol_body_opt(symbol_name, file_hint, 400)
+    }
+
+    /// Retrieve the exact code implementation of a symbol with custom line limit
+    pub fn get_symbol_body_opt(
+        &self,
+        symbol_name: &str,
+        file_hint: Option<&Path>,
+        max_lines: usize,
+    ) -> Option<SymbolBodyResult> {
         let matches = self.find_symbol(symbol_name);
         if matches.is_empty() {
             return None;
@@ -786,7 +899,6 @@ impl VectorGraph {
         let start = chosen_sym.start_line.saturating_sub(1);
         let end = chosen_sym.end_line.min(lines.len());
 
-        let max_lines = 250;
         let line_count = end.saturating_sub(start);
         let (body, is_truncated) = if line_count > max_lines {
             let mut truncated = lines[start..start + max_lines].join("\n");
@@ -1383,7 +1495,7 @@ mod tests {
     fn test_body_truncation() {
         let mut graph = VectorGraph::new();
         let mut long_lines = Vec::new();
-        for i in 0..300 {
+        for i in 0..450 {
             long_lines.push(format!("    let x_{} = {};", i, i));
         }
         let content = format!("fn huge_function() {{\n{}\n}}\n", long_lines.join("\n"));
@@ -1391,7 +1503,7 @@ mod tests {
             name: "huge_function".to_string(),
             kind: SymbolKind::Function,
             start_line: 1,
-            end_line: 302,
+            end_line: 452,
             signature: "fn huge_function()".to_string(),
             doc_comment: None,
         };
