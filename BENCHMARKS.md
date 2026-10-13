@@ -139,24 +139,24 @@ Token counts measured in exact OpenAI `cl100k_base` BPE tokens:
 
 | # | Task & Operation | Baseline (`rg` / `cat`) | Layer Tool | Baseline Tokens | Layer Tokens | Token Delta | Baseline ms | Layer ms |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | Inspect `WindowBuilder` struct | `rg` + `sed` (2 calls) | `get_symbol_body` | 184 | 212 | -15.2% | 25.9 | 44.4 |
-| **2** | Callers of `serialize_node` | `rg` (1 call) | `get_callers` | 290 | 409 | -41.0% | 27.1 | 75.5 |
-| **3** | Explore `html.rs` outline (442 L) | `cat html.rs` (1 call) | `get_file_skeleton` | 3,404 | 944 | **+72.3%** | 8.6 | 41.2 |
-| **4** | Find `Manager` trait declarations | `rg` (1 call) | `find_symbol` | 67 | 332 | -395.5% | 28.7 | 44.5 |
-| **5** | Pre-refactor impact of `WebviewBuilder` | `rg` (2 calls) | `get_impact_radius` | 2,794 | 795 | **+71.5%** | 33.1 | 90.6 |
-| **6** | `normalize_script_for_csp` references | `rg` (1 call) | `find_references` | 428 | 334 | **+22.0%** | 27.0 | 67.8 |
-| **7** | Search event loop message dispatch | `rg` across crates | `search` | 1,626 | 338 | **+79.2%** | 35.9 | 55.3 |
-| **8** | Inspect `inject_nonce_token` body | `rg` + `sed` (2 calls) | `get_symbol_body` | 106 | 146 | -37.7% | 20.3 | 41.9 |
-| **9** | Surgical lines 100–130 in `lib.rs` | `sed -n` (1 call) | `get_lines` | 261 | 358 | -37.2% | 8.0 | 41.1 |
-| **10** | Inspect `run_iteration` function body | `rg` + `sed` (2 calls) | `get_symbol_body` | 173 | 223 | -28.9% | 21.3 | 41.9 |
-| | **Totals Across All 10 Tasks** | **15 tool calls** | **10 tool calls** | **9,333** | **4,091** | **+56.2%** | 235.9 | 544.2 |
+| **1** | Inspect `WindowBuilder` struct | `rg` + `sed` (2 calls) | `get_symbol_body` | 184 | 212 | -15.2% | 25.9 | 52.8 |
+| **2** | Callers of `serialize_node` | `rg` (1 call) | `get_callers` | 290 | 409 | -41.0% | 27.1 | 54.2 |
+| **3** | Explore `html.rs` outline (442 L) | `cat html.rs` (1 call) | `get_file_skeleton` | 3,404 | 1,010 | **+70.3%** | 8.6 | 53.4 |
+| **4** | Find `Manager` trait declarations | `rg` (1 call) | `find_symbol` | 67 | 365 | -444.8% | 28.7 | 52.6 |
+| **5** | Pre-refactor impact of `WebviewBuilder` | `rg` (2 calls) | `get_impact_radius` | 2,794 | 635 | **+77.3%** | 33.1 | 187.3 |
+| **6** | `normalize_script_for_csp` references | `rg` (1 call) | `find_references` | 428 | 217 | **+49.3%** | 27.0 | 78.3 |
+| **7** | Search event loop message dispatch | `rg` across crates | `search` | 1,626 | 312 | **+80.8%** | 35.9 | 112.7 |
+| **8** | Inspect `inject_nonce_token` body | `rg` + `sed` (2 calls) | `get_symbol_body` | 106 | 146 | -37.7% | 20.3 | 49.0 |
+| **9** | Surgical lines 100–130 in `lib.rs` | `sed -n` (1 call) | `get_lines` | 261 | 358 | -37.2% | 8.0 | 45.2 |
+| **10** | Inspect `run_iteration` function body | `rg` + `sed` (2 calls) | `get_symbol_body` | 173 | 223 | -28.9% | 21.3 | 43.4 |
+| | **Totals Across All 10 Tasks** | **15 tool calls** | **10 tool calls** | **9,333** | **3,887** | **+58.4%** | 235.9 | 728.9 |
 
 ### 4.2 Category Breakdown (The "Hybrid" Architecture Divide)
 
 | Category | Tasks Included | Baseline Tokens | Layer Tokens | Net Token Delta | Baseline Tool Turns | Layer Tool Turns |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Category A: Large Structural Outputs** | 3, 5, 6, 7 | 8,252 tokens | **2,411 tokens** | **+70.8% Leaner** | 6 calls | **4 calls** |
-| **Category B: Tiny Literal Lookups** | 1, 2, 4, 8, 9, 10 | 1,081 tokens | **1,680 tokens** | -55.4% (JSON tax) | 9 calls | **6 calls** |
+| **Category A: Large Structural Outputs** | 3, 5, 6, 7 | 8,252 tokens | **2,174 tokens** | **+73.7% Leaner** | 6 calls | **4 calls** |
+| **Category B: Tiny Literal Lookups** | 1, 2, 4, 8, 9, 10 | 1,081 tokens | **1,713 tokens** | -58.5% (JSON tax) | 9 calls | **6 calls** |
 
 *Takeaway*: For tiny 5-line lookups, raw `sed`/`grep` on cached SSD files has less schema overhead. For structural navigation, impact analysis, and file outlines, Layer saves **70%–80% of tokens**.
 

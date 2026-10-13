@@ -180,7 +180,7 @@ Layer has been evaluated in head-to-head comparisons against standard agent tool
 | **Creo** (C++17 / Qt) | Symbol retrieval & call-site discovery | 18,400 tokens / 14 calls | **3,100 tokens / 6 calls** | **-83.2% tokens**, 100% CTest pass |
 | **Creo UI** (React 18 / TS) | Refactor monolithic 2,000-line `App.tsx` | ~35,000 tokens (3 reads) | **3,148 tokens / 9 calls** | **-91.0% tokens**, 0 full-file reads |
 | **Claude Code** (Sonnet 4.5) | 6-task cumulative agent development | $1.28 / 42 requests / 5m 48s | **$0.47 / 19 requests / 2m 13s** | **-63% cost**, **-55% turns**, **-62% time** |
-| **Tauri** (Rust, 856 files) | 10-task suite vs `ripgrep 15.2` | 9,333 tokens / 15 calls | **4,091 tokens / 10 calls** | **+56.2% net tokens**, 100% precision |
+| **Tauri** (Rust, 856 files) | 10-task suite vs `ripgrep 15.2` | 9,333 tokens / 15 calls | **3,887 tokens / 10 calls** | **+58.4% net tokens**, 100% precision |
 | **Tauri** (IPC Security Audit) | Autonomous unprompted agent audit | ~28,000 tokens (cat/grep) | **~3,500 tokens (11 calls)** | **~87% token reduction**, 100% accuracy |
 
 ### When to Use `ripgrep` vs. `layer`
