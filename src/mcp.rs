@@ -12,6 +12,7 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
     let mut writer = stdout.lock();
 
     let mut line = String::new();
+    let mut recent_queries: Vec<String> = Vec::new();
     while reader.read_line(&mut line)? > 0 {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -30,6 +31,7 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
                 id,
                 val.get("params"),
                 &mut writer,
+                &mut recent_queries,
             )?;
         }
 
@@ -46,6 +48,7 @@ fn handle_rpc_method(
     id: Option<serde_json::Value>,
     params: Option<&serde_json::Value>,
     writer: &mut io::StdoutLock,
+    recent_queries: &mut Vec<String>,
 ) -> io::Result<()> {
     match method {
         "initialize" => {
@@ -313,7 +316,29 @@ fn handle_rpc_method(
                 Err(poisoned) => poisoned.into_inner(),
             };
 
-            let content_text = execute_tool(&mut g, root, tool_name, arguments);
+            let query_key = format!(
+                "{}:{}",
+                tool_name,
+                arguments.unwrap_or(&serde_json::Value::Null)
+            );
+            let is_duplicate = recent_queries.contains(&query_key);
+            if recent_queries.len() >= 50 {
+                recent_queries.remove(0);
+            }
+            recent_queries.push(query_key);
+
+            let mut content_text = execute_tool(&mut g, root, tool_name, arguments);
+            if is_duplicate
+                && !content_text.starts_with("Error:")
+                && let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&content_text)
+                && let Some(obj) = parsed.as_object_mut()
+            {
+                obj.insert(
+                    "_retrieval_notice".to_string(),
+                    json!("Advisory: Identical query was already executed earlier in this session. Avoid repeated queries with identical arguments to preserve context."),
+                );
+                content_text = serde_json::to_string(&parsed).unwrap_or(content_text);
+            }
             let duration = start_time.elapsed();
             let byte_count = content_text.len();
             let approx_tokens = byte_count.div_ceil(4);

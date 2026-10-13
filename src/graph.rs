@@ -569,9 +569,25 @@ impl VectorGraph {
         }
 
         let mut result = String::new();
+        let max_total_bytes = 24 * 1024; // 24 KB ceiling
         for (idx, line) in lines[start..end].iter().enumerate() {
             let actual_line = start + idx + 1;
-            result.push_str(&format!("{:4} | {}\n", actual_line, line));
+            if result.len() > max_total_bytes {
+                result.push_str(&format!(
+                    "\n... [Output capped at 24KB limit at line {} of {}. Narrow requested line range]",
+                    actual_line, end
+                ));
+                break;
+            }
+            if line.len() > 1000 {
+                result.push_str(&format!(
+                    "{:4} | {}... [line truncated at 1000 chars]\n",
+                    actual_line,
+                    &line[..1000]
+                ));
+            } else {
+                result.push_str(&format!("{:4} | {}\n", actual_line, line));
+            }
         }
         Some(result)
     }
@@ -671,6 +687,60 @@ impl VectorGraph {
                 }
             }
         }
+        // Deterministic relevance ranking:
+        // 1. Exact case-sensitive match (+100) vs case-insensitive (+60) vs suffix (+20)
+        // 2. Definition kind: Struct/Class/Trait/Interface (+40) > Function (+30) > Method (+15)
+        // 3. Public visibility: "pub " or "export " (+25)
+        // 4. Prominent path: lib.rs, main.rs, app.rs, index.ts (+30)
+        // 5. Demote test/mock/example paths (-60)
+        results.sort_by(|(path_a, sym_a), (path_b, sym_b)| {
+            let score = |path: &Path, sym: &Symbol| -> i32 {
+                let mut s = 0;
+                if sym.name == symbol_name {
+                    s += 100;
+                } else if sym.name.eq_ignore_ascii_case(symbol_name) {
+                    s += 60;
+                } else {
+                    s += 20;
+                }
+                match sym.kind {
+                    SymbolKind::Struct
+                    | SymbolKind::Class
+                    | SymbolKind::Trait
+                    | SymbolKind::Interface => s += 40,
+                    SymbolKind::Function => s += 30,
+                    SymbolKind::Method => s += 15,
+                    SymbolKind::TypeAlias | SymbolKind::Enum => s += 20,
+                    _ => s += 5,
+                }
+                if sym.signature.contains("pub ") || sym.signature.starts_with("export ") {
+                    s += 25;
+                }
+                let p_str = path.to_string_lossy();
+                if p_str.contains("/test")
+                    || p_str.contains("/mock")
+                    || p_str.contains("/example")
+                    || p_str.contains("_test.")
+                    || p_str.contains(".test.")
+                {
+                    s -= 60;
+                } else if p_str.ends_with("lib.rs")
+                    || p_str.ends_with("main.rs")
+                    || p_str.ends_with("app.rs")
+                    || p_str.ends_with("index.ts")
+                    || p_str.ends_with("mod.rs")
+                {
+                    s += 30;
+                }
+                s
+            };
+            let sa = score(path_a, sym_a);
+            let sb = score(path_b, sym_b);
+            sb.cmp(&sa)
+                .then_with(|| path_a.cmp(path_b))
+                .then_with(|| sym_a.start_line.cmp(&sym_b.start_line))
+        });
+
         if let Some(lim) = limit {
             results.truncate(lim);
         }
@@ -931,7 +1001,23 @@ impl VectorGraph {
             );
             (truncated, true, Some(hint))
         } else if start < end {
-            (lines[start..end].join("\n"), false, None)
+            let joined = lines[start..end].join("\n");
+            let max_total_bytes = 32 * 1024;
+            if joined.len() > max_total_bytes {
+                let mut truncated = joined[..max_total_bytes].to_string();
+                truncated.push_str(
+                    "\n// ... [truncated: exceeded 32KB byte limit. Inspect smaller fragments with get_lines]",
+                );
+                let hint = format!(
+                    "Symbol body exceeded 32KB byte safety limit. Inspect with get_lines(path='{}', start={}, end={}).",
+                    chosen_path.display(),
+                    chosen_sym.start_line,
+                    chosen_sym.end_line
+                );
+                (truncated, true, Some(hint))
+            } else {
+                (joined, false, None)
+            }
         } else {
             (chosen_sym.signature.clone(), false, None)
         };
