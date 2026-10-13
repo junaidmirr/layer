@@ -1804,7 +1804,9 @@ mod tests {
         assert!(hint.contains("start=11, end=22"));
 
         // Get remainder using get_file_lines(start=11, end=22)
-        let remainder = graph.get_file_lines(Path::new("src/lib.rs"), 11, 22).unwrap();
+        let remainder = graph
+            .get_file_lines(Path::new("src/lib.rs"), 11, 22)
+            .unwrap();
         let remainder_lines: Vec<&str> = remainder
             .lines()
             .map(|l| {
@@ -1817,8 +1819,12 @@ mod tests {
             .collect();
 
         // Verify chunk1 returned lines + remainder lines match original content lines exactly
-        let chunk1_code_lines: Vec<&str> = chunk1.body.lines().take(chunk1.returned_lines).collect();
-        let combined: Vec<&str> = chunk1_code_lines.into_iter().chain(remainder_lines).collect();
+        let chunk1_code_lines: Vec<&str> =
+            chunk1.body.lines().take(chunk1.returned_lines).collect();
+        let combined: Vec<&str> = chunk1_code_lines
+            .into_iter()
+            .chain(remainder_lines)
+            .collect();
         let original_lines: Vec<&str> = content.lines().collect();
         assert_eq!(combined, original_lines);
     }
@@ -1835,7 +1841,11 @@ mod tests {
             signature: "fn run(&self)".to_string(),
             doc_comment: None,
         };
-        graph.upsert_file(make_test_node("tests/mocks/app_mock.rs", "fn run() {}", vec![sym_mock]));
+        graph.upsert_file(make_test_node(
+            "tests/mocks/app_mock.rs",
+            "fn run() {}",
+            vec![sym_mock],
+        ));
 
         // Real entry point in lib.rs
         let sym_real = Symbol {
@@ -1846,7 +1856,11 @@ mod tests {
             signature: "pub fn run()".to_string(),
             doc_comment: None,
         };
-        graph.upsert_file(make_test_node("src/lib.rs", "pub fn run() {}", vec![sym_real]));
+        graph.upsert_file(make_test_node(
+            "src/lib.rs",
+            "pub fn run() {}",
+            vec![sym_real],
+        ));
 
         let matches = graph.find_symbol_filtered("run", None, Some(5));
         assert_eq!(matches.len(), 2);
