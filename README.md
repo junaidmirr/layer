@@ -103,10 +103,46 @@ All CLI commands support global flags: `-p / --path <DIR>`, `--json` (machine-re
 
 ## Installation
 
-### Prerequisites
-- [Rust toolchain](https://rustup.rs/) (Rust 1.85+ / 2024 edition) and a C compiler (for compiling the bundled Tree-sitter C grammars).
+### One-Line Installers (Zero Dependencies Required)
 
-### Install via Cargo
+No Rust toolchain, C compilers, or Visual Studio Build Tools required. These scripts automatically detect your platform, download the latest pre-compiled binary, and add it to your `PATH`:
+
+**Windows (PowerShell)**:
+```powershell
+irm https://raw.githubusercontent.com/junaidmirr/layer/master/install.ps1 | iex
+```
+
+**macOS & Linux**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/junaidmirr/layer/master/install.sh | sh
+```
+
+---
+
+### Standalone Pre-Built Binaries
+
+Download standalone executables directly from [GitHub Releases](https://github.com/junaidmirr/layer/releases):
+
+| Platform | Architecture | Package Format | Binary Inside |
+| :--- | :--- | :--- | :--- |
+| **Windows** | x86_64 | `.zip` | `layer.exe` (run directly) |
+| **macOS** | Apple Silicon (M1/M2/M3/M4) | `.tar.gz` | `layer` |
+| **macOS** | Intel (x86_64) | `.tar.gz` | `layer` |
+| **Linux** | x86_64 | `.tar.gz` | `layer` |
+
+---
+
+### Docker Container
+
+For containerized agent sandboxes (Cursor Docker, devcontainers, or remote agent runners):
+```bash
+docker run -i --rm -v $(pwd):/workspace ghcr.io/junaidmirr/layer:latest mcp
+```
+
+---
+
+### Build From Source (Rust Developers)
+
 ```bash
 git clone https://github.com/junaidmirr/layer.git
 cd layer
