@@ -8,9 +8,21 @@ use crate::scanner::AstScanner;
 use crate::walker::CodebaseScanner;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+static IMPORT_PATH_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"['"]([^'"]+)['"]"#).unwrap());
+
+fn default_path_aliases() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    map.insert("@/*".to_string(), "src/*".to_string());
+    map.insert("~/*".to_string(), "src/*".to_string());
+    map
+}
 
 #[derive(Debug)]
 pub struct VectorGraph {
@@ -26,6 +38,8 @@ pub struct VectorGraph {
     pub node_indices: HashMap<PathBuf, NodeIndex>,
     pub last_sync: Option<std::time::Instant>,
     pub last_verification: Option<Vec<crate::verifier::DiagnosticItem>>,
+    /// Configured path aliases (e.g. "@/*" -> "src/*") from tsconfig.json or defaults
+    pub path_aliases: HashMap<String, String>,
 }
 
 impl Default for VectorGraph {
@@ -58,6 +72,7 @@ impl VectorGraph {
             node_indices: HashMap::new(),
             last_sync: None,
             last_verification: None,
+            path_aliases: default_path_aliases(),
         }
     }
 
@@ -69,6 +84,7 @@ impl VectorGraph {
         self.node_indices.clear();
         self.last_sync = None;
         self.last_verification = None;
+        self.path_aliases = default_path_aliases();
     }
 
     /// Insert or update a file node and re-index its chunks and graph connections
@@ -273,6 +289,7 @@ impl VectorGraph {
     /// Synchronously synchronize the workspace index with disk.
     /// Eliminates debouncer race conditions when an agent creates files and queries immediately.
     pub fn sync_workspace(&mut self, root: &Path) {
+        self.load_tsconfig_aliases(root);
         let scanner = CodebaseScanner::new(root);
         let walker = ignore::WalkBuilder::new(root)
             .hidden(true)
@@ -359,6 +376,37 @@ impl VectorGraph {
         }
     }
 
+    /// Load TypeScript compilerOptions.paths aliases from tsconfig.json if present
+    pub fn load_tsconfig_aliases(&mut self, root: &Path) {
+        self.path_aliases = default_path_aliases();
+
+        let tsconfig_path = root.join("tsconfig.json");
+        if !tsconfig_path.exists() {
+            return;
+        }
+
+        if let Ok(raw) = fs::read_to_string(&tsconfig_path) {
+            let stripped = strip_json_comments(&raw);
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stripped)
+                && let Some(paths) = parsed
+                    .get("compilerOptions")
+                    .and_then(|c| c.get("paths"))
+                    .and_then(|p| p.as_object())
+            {
+                for (alias, targets) in paths {
+                    if let Some(first_target) = targets
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|t| t.as_str())
+                    {
+                        self.path_aliases
+                            .insert(alias.clone(), first_target.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     /// Rebuild import/dependency edges for a specific file node
     fn rebuild_edges_for_node(&mut self, source_idx: NodeIndex) {
         // Clear old outgoing edges from this node so stale imports are never retained
@@ -374,19 +422,53 @@ impl VectorGraph {
         let source_path = self.graph[source_idx].clone();
         if let Some(file_node) = self.files.get(&source_path) {
             let imports = file_node.imports.clone();
+            let known_files: HashSet<PathBuf> = self.files.keys().cloned().collect();
+
             for import in imports {
-                // Heuristic matching: find if import matches another file in our files list
-                for (other_path, &target_idx) in &self.node_indices {
-                    if *other_path == source_path {
-                        continue;
-                    }
-                    let other_str = other_path.to_string_lossy();
-                    let stem = other_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-                    if (!stem.is_empty() && import.contains(stem)) || import.contains(&*other_str) {
+                let mut matched_target: Option<PathBuf> = None;
+
+                // 1. Try extracting string literal specifier for TS/JS
+                if let Some(caps) = IMPORT_PATH_REGEX.captures(&import)
+                    && let Some(spec) = caps.get(1)
+                {
+                    matched_target = resolve_module_import_path(
+                        &source_path,
+                        spec.as_str(),
+                        &known_files,
+                        &self.path_aliases,
+                    );
+                }
+
+                // 2. Try Rust module resolution
+                if matched_target.is_none()
+                    && source_path.extension().and_then(|e| e.to_str()) == Some("rs")
+                {
+                    matched_target = resolve_rust_import_path(&source_path, &import, &known_files);
+                }
+
+                // 3. Connect edge if target matched
+                if let Some(ref target) = matched_target {
+                    if let Some(&target_idx) = self.node_indices.get(target)
+                        && target_idx != source_idx
+                    {
                         self.graph.update_edge(source_idx, target_idx, ());
+                    }
+                } else {
+                    // Fallback heuristic: match file stem if length >= 3
+                    for (other_path, &target_idx) in &self.node_indices {
+                        if *other_path == source_path {
+                            continue;
+                        }
+                        let other_str = other_path.to_string_lossy();
+                        let stem = other_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        if (!stem.is_empty() && stem.len() >= 3 && import.contains(stem))
+                            || import.contains(&*other_str)
+                        {
+                            self.graph.update_edge(source_idx, target_idx, ());
+                        }
                     }
                 }
             }
@@ -1430,6 +1512,180 @@ fn is_code_file_node(node: &FileNode) -> bool {
         return true;
     }
     !node.symbols.is_empty()
+}
+
+pub fn strip_json_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if in_line_comment {
+            if c == '\n' {
+                in_line_comment = false;
+                out.push(c);
+            }
+        } else if in_block_comment {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+        } else if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(next_c) = chars.next() {
+                    out.push(next_c);
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            in_line_comment = true;
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+pub fn normalize_relative_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::Normal(c) => {
+                components.push(c);
+            }
+            _ => {}
+        }
+    }
+    let mut result = PathBuf::new();
+    for c in components {
+        result.push(c);
+    }
+    result
+}
+
+pub fn resolve_module_import_path(
+    source_path: &Path,
+    import_specifier: &str,
+    known_files: &HashSet<PathBuf>,
+    path_aliases: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    let spec = import_specifier.trim();
+    if spec.is_empty() {
+        return None;
+    }
+
+    // 1. Check if it's an aliased import, e.g. "@/..." or "~/"
+    let mut resolved_base: Option<PathBuf> = None;
+    for (alias_key, target_prefix) in path_aliases {
+        let key_clean = alias_key.trim_end_matches('*');
+        let target_clean = target_prefix.trim_end_matches('*');
+        if let Some(remainder) = spec.strip_prefix(key_clean) {
+            let joined = format!("{}{}", target_clean, remainder);
+            resolved_base = Some(normalize_relative_path(Path::new(&joined)));
+            break;
+        }
+    }
+
+    // 2. If not aliased, check if it's a relative import
+    if resolved_base.is_none() {
+        if spec.starts_with("./") || spec.starts_with("../") {
+            let parent = source_path.parent().unwrap_or(Path::new(""));
+            let joined = parent.join(spec);
+            resolved_base = Some(normalize_relative_path(&joined));
+        } else {
+            resolved_base = Some(normalize_relative_path(Path::new(spec)));
+        }
+    }
+
+    let base = resolved_base?;
+
+    // 3. Try candidate extensions in order of specificity
+    let base_str = base.to_string_lossy();
+    let candidates = [
+        base.clone(), // direct match with extension (e.g. .css, .tsx, .json)
+        PathBuf::from(format!("{}.ts", base_str)),
+        PathBuf::from(format!("{}.tsx", base_str)),
+        PathBuf::from(format!("{}.d.ts", base_str)),
+        PathBuf::from(format!("{}.js", base_str)),
+        PathBuf::from(format!("{}.jsx", base_str)),
+        base.join("index.ts"),
+        base.join("index.tsx"),
+        base.join("index.js"),
+    ];
+
+    for candidate in &candidates {
+        let norm = normalize_relative_path(candidate);
+        if known_files.contains(&norm) {
+            return Some(norm);
+        }
+    }
+
+    None
+}
+
+pub fn resolve_rust_import_path(
+    source_path: &Path,
+    import: &str,
+    known_files: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let trimmed = import.trim();
+    // 1. mod foo;
+    if (trimmed.starts_with("mod ") || trimmed.starts_with("pub mod "))
+        && let Some(mod_name) = trimmed
+            .split_whitespace()
+            .last()
+            .map(|s| s.trim_end_matches(';').trim())
+    {
+        let parent = source_path.parent().unwrap_or(Path::new(""));
+        let file_cand = normalize_relative_path(&parent.join(format!("{}.rs", mod_name)));
+        if known_files.contains(&file_cand) {
+            return Some(file_cand);
+        }
+        let mod_cand = normalize_relative_path(&parent.join(mod_name).join("mod.rs"));
+        if known_files.contains(&mod_cand) {
+            return Some(mod_cand);
+        }
+    }
+
+    // 2. use crate::foo::bar;
+    if let Some(crate_pos) = trimmed.find("crate::") {
+        let after = &trimmed[crate_pos + 7..];
+        let segments: Vec<&str> = after
+            .split([':', ';', '{', '}'])
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut cur = PathBuf::from("src");
+        for seg in segments {
+            cur.push(seg);
+            let file_cand =
+                normalize_relative_path(&PathBuf::from(format!("{}.rs", cur.to_string_lossy())));
+            if known_files.contains(&file_cand) {
+                return Some(file_cand);
+            }
+            let mod_cand = normalize_relative_path(&cur.join("mod.rs"));
+            if known_files.contains(&mod_cand) {
+                return Some(mod_cand);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
