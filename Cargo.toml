@@ -37,3 +37,6 @@ tree-sitter-cpp = "0.23.4"
 [features]
 default = []
 server = ["dep:axum", "dep:tower-http"]
+
+[dev-dependencies]
+tempfile = "3.27"

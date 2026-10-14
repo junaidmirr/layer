@@ -1,23 +1,14 @@
-pub mod context_engine;
-pub mod embedder;
-pub mod graph;
-pub mod history;
-pub mod mcp;
-pub mod models;
-pub mod scanner;
-pub mod walker;
-pub mod watcher;
-
 use clap::{Parser, Subcommand};
 use colored::*;
-use context_engine::ContextEngine;
-use graph::VectorGraph;
+use layer::context_engine::ContextEngine;
+use layer::graph::VectorGraph;
+use layer::mcp;
+use layer::walker::CodebaseScanner;
+use layer::watcher::CodeWatcher;
 use rustyline::DefaultEditor;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use walker::CodebaseScanner;
-use watcher::CodeWatcher;
 
 #[derive(Parser, Debug)]
 #[command(name = "layer")]
@@ -124,6 +115,29 @@ enum Commands {
     Diff {
         /// History record event ID (e.g. 1)
         id: usize,
+    },
+    /// Scaffold a new project starter in an empty destination directory
+    Scaffold {
+        /// Project template (e.g. rust-cli)
+        #[arg(short, long, default_value = "rust-cli")]
+        template: String,
+        /// Project name (e.g. my_tool)
+        #[arg(short, long)]
+        name: String,
+        /// Optional destination directory (defaults to current path)
+        #[arg(short, long)]
+        dest: Option<PathBuf>,
+    },
+    /// Compile a task-specific, token-bounded context packet
+    Prepare {
+        /// Task description (e.g. 'implement postgres user repository')
+        task: String,
+        /// Optional target file path being written or edited
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Token budget ceiling
+        #[arg(short, long, default_value_t = 1200)]
+        max_tokens: usize,
     },
     /// Keep running as a live watching daemon
     Watch,
@@ -538,6 +552,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let query_text = prompt.join(" ");
             let g = graph_arc.lock().unwrap();
             println!("{}", ContextEngine::execute_query(&g, &query_text));
+        }
+        Some(Commands::Scaffold {
+            template,
+            name,
+            dest,
+        }) => {
+            let target = dest.unwrap_or_else(|| root.clone());
+            let supported = match layer::scaffold::SupportedTemplate::parse(&template) {
+                Some(t) => t,
+                None => {
+                    eprintln!(
+                        "Error: Unsupported template '{}'. Supported templates: 'rust-cli'",
+                        template
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let mut g = graph_arc.lock().unwrap();
+            match layer::scaffold::scaffold_project(supported, &name, &target, &mut g) {
+                Ok(res) => {
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&res)?);
+                    } else {
+                        println!("{} {}", "✓".green().bold(), res.message.bold());
+                        println!("  Destination: {}", res.destination.cyan());
+                        println!("  Created files:");
+                        for f in &res.created_files {
+                            println!("    • {}", f);
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("{} {}", "Error:".red().bold(), err);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(Commands::Prepare {
+            task,
+            file,
+            max_tokens,
+        }) => {
+            let g = graph_arc.lock().unwrap();
+            let packet = layer::context_compiler::ContextCompiler::compile_task_context(
+                &g,
+                &task,
+                file.as_deref(),
+                max_tokens,
+            );
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&packet)?);
+            } else {
+                println!(
+                    "{}",
+                    format!("📋 Compiled Context for Task: {}", packet.task)
+                        .cyan()
+                        .bold()
+                );
+                println!(
+                    "  Budget: {}/{} tokens (truncated: {})",
+                    packet.budget.estimated_tokens,
+                    packet.budget.max_tokens,
+                    packet.budget.is_truncated
+                );
+                if !packet.interfaces.is_empty() {
+                    println!("\n  {}", "Interfaces / Traits:".yellow().bold());
+                    for iface in &packet.interfaces {
+                        println!(
+                            "    • {} ({}) in {}:{}..{}",
+                            iface.symbol, iface.kind, iface.file, iface.lines[0], iface.lines[1]
+                        );
+                        println!("      Signature: {}", iface.signature.dimmed());
+                    }
+                }
+                if !packet.types.is_empty() {
+                    println!("\n  {}", "Types & Models:".yellow().bold());
+                    for t in &packet.types {
+                        println!(
+                            "    • {} ({}) in {}:{}..{}",
+                            t.symbol, t.kind, t.file, t.lines[0], t.lines[1]
+                        );
+                    }
+                }
+                if !packet.errors.is_empty() {
+                    println!("\n  {}", "Error Types:".yellow().bold());
+                    for err in &packet.errors {
+                        println!(
+                            "    • {} in {}:{}..{}",
+                            err.symbol, err.file, err.lines[0], err.lines[1]
+                        );
+                    }
+                }
+                if !packet.imports.is_empty() {
+                    println!("\n  {}", "Relevant Imports:".yellow().bold());
+                    for imp in &packet.imports {
+                        println!("    {}", imp);
+                    }
+                }
+                if !packet.unresolved_dependencies.is_empty() {
+                    println!("\n  {}", "Unresolved Dependencies:".red().bold());
+                    for un in &packet.unresolved_dependencies {
+                        println!("    ⚠ {}", un);
+                    }
+                }
+            }
         }
         Some(Commands::Watch) => {
             println!("{}", "👀 Watch mode active. Monitoring file changes in real-time... (Press Ctrl+C to stop)".magenta());

@@ -297,6 +297,50 @@ fn handle_rpc_method(
                                     }
                                 }
                             }
+                        },
+                        {
+                            "name": "scaffold_template",
+                            "description": "Scaffold a verified, minimal project starter in an empty destination directory. Guarantees zero overwrites and immediately synchronizes the workspace graph. Supported templates: 'rust-cli'.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "template": {
+                                        "type": "string",
+                                        "description": "Template name to scaffold. Supported: 'rust-cli'"
+                                    },
+                                    "project_name": {
+                                        "type": "string",
+                                        "description": "Name of the new project (must be valid identifier)"
+                                    },
+                                    "destination": {
+                                        "type": "string",
+                                        "description": "Optional relative destination directory path (defaults to current workspace root)"
+                                    }
+                                },
+                                "required": ["template", "project_name"]
+                            }
+                        },
+                        {
+                            "name": "prepare_task_context",
+                            "description": "Compile a task-specific, token-bounded context packet containing relevant interfaces, types, errors, imports, and provenance. Replaces exploratory multi-tool loops with a single ranked, budgeted context delivery.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "task": {
+                                        "type": "string",
+                                        "description": "Description of the module or feature to implement, e.g. 'implement postgres user repository with error handling'"
+                                    },
+                                    "target_path": {
+                                        "type": "string",
+                                        "description": "Optional relative file path being written or edited"
+                                    },
+                                    "max_tokens": {
+                                        "type": "integer",
+                                        "description": "Optional token ceiling for the context packet (default: 1200)"
+                                    }
+                                },
+                                "required": ["task"]
+                            }
                         }
                     ]
                 }
@@ -710,6 +754,60 @@ fn execute_tool(
                 .map(|l| l as usize);
             let path_buf = path_str.map(PathBuf::from);
             g.format_compact_tree(path_buf.as_deref(), max_depth, limit)
+        }
+        "scaffold_template" => {
+            let template_str = args.get("template").and_then(|t| t.as_str()).unwrap_or("");
+            let project_name = args
+                .get("project_name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let dest_str = args
+                .get("destination")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+
+            let supported = match crate::scaffold::SupportedTemplate::parse(template_str) {
+                Some(t) => t,
+                None => {
+                    return format!(
+                        "Error: Unsupported template '{}'. Supported templates: 'rust-cli'",
+                        template_str
+                    );
+                }
+            };
+
+            let dest_path = if dest_str.is_empty() || dest_str == "." {
+                root.to_path_buf()
+            } else {
+                match resolve_safe_path(root, dest_str) {
+                    Ok(p) => root.join(p),
+                    Err(e) => return e,
+                }
+            };
+
+            match crate::scaffold::scaffold_project(supported, project_name, &dest_path, g) {
+                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_else(|_| "{}".to_string()),
+                Err(err) => format!("Error: {}", err),
+            }
+        }
+        "prepare_task_context" => {
+            let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("");
+            let target_path_str = args.get("target_path").and_then(|p| p.as_str());
+            let max_tokens = args
+                .get("max_tokens")
+                .and_then(|m| m.as_u64())
+                .map(|m| m as usize)
+                .unwrap_or(1200);
+
+            let target_buf = target_path_str.and_then(|p| resolve_safe_path(root, p).ok());
+
+            let packet = crate::context_compiler::ContextCompiler::compile_task_context(
+                g,
+                task,
+                target_buf.as_deref(),
+                max_tokens,
+            );
+            serde_json::to_string_pretty(&packet).unwrap_or_default()
         }
         _ => format!("Unknown tool: {}", tool_name),
     }
