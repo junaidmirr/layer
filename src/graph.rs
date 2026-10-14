@@ -279,6 +279,7 @@ impl VectorGraph {
             .build();
 
         let mut seen_paths = std::collections::HashSet::new();
+        let mut any_changes = false;
 
         for entry in walker.filter_map(Result::ok) {
             let path = entry.path();
@@ -318,6 +319,7 @@ impl VectorGraph {
                         "[layer-sync] Discovered/updated file: {}",
                         rel_path.display()
                     );
+                    any_changes = true;
                     self.upsert_file(file_node);
                 }
             }
@@ -331,9 +333,26 @@ impl VectorGraph {
             .cloned()
             .collect();
 
+        if !to_remove.is_empty() {
+            any_changes = true;
+        }
+
         for p in to_remove {
             eprintln!("[layer-sync] Removed deleted file: {}", p.display());
             self.remove_file(&p);
+        }
+
+        // Rebuild all dependency edges across files once all nodes are registered in the graph
+        if any_changes {
+            self.rebuild_all_edges();
+        }
+    }
+
+    /// Rebuild all dependency edges across the entire graph
+    pub fn rebuild_all_edges(&mut self) {
+        let all_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
+        for idx in all_indices {
+            self.rebuild_edges_for_node(idx);
         }
     }
 
