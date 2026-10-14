@@ -341,6 +341,20 @@ fn handle_rpc_method(
                                 },
                                 "required": ["task"]
                             }
+                        },
+                        {
+                            "name": "set_workspace",
+                            "description": "Dynamically switch Layer's active workspace root to a different project directory. Clears the previous index and immediately indexes the new project. Use this whenever switching repositories or when working in multi-repo workflows.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Relative or absolute path to the target project directory (e.g. '.' or '/path/to/project')"
+                                    }
+                                },
+                                "required": ["path"]
+                            }
                         }
                     ]
                 }
@@ -432,6 +446,32 @@ fn handle_rpc_method(
     Ok(())
 }
 
+/// Given an absolute path to a file or directory, walk up parent directories to find a project root indicator
+/// (.git, Cargo.toml, package.json, pyproject.toml, go.mod, etc.)
+pub fn find_project_root_for_path(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+
+    while current.parent().is_some() {
+        if current.join(".git").exists()
+            || current.join("Cargo.toml").exists()
+            || current.join("package.json").exists()
+            || current.join("pyproject.toml").exists()
+            || current.join("go.mod").exists()
+        {
+            return Some(current);
+        }
+        current = match current.parent() {
+            Some(p) => p.to_path_buf(),
+            None => break,
+        };
+    }
+    None
+}
+
 /// Canonicalizes a path from user/agent, resolves it against root, and ensures it is safely within root
 fn resolve_safe_path(root: &Path, raw_path: &str) -> Result<PathBuf, String> {
     if raw_path.trim().is_empty() {
@@ -484,14 +524,92 @@ fn resolve_safe_path(root: &Path, raw_path: &str) -> Result<PathBuf, String> {
     }
 }
 
+fn maybe_switch_workspace_root(
+    root: &mut PathBuf,
+    g: &mut VectorGraph,
+    candidate_path: Option<&str>,
+) {
+    let raw_p = match candidate_path {
+        Some(p) => p,
+        None => return,
+    };
+    let p = Path::new(raw_p);
+    if !p.is_absolute() || !p.exists() {
+        return;
+    }
+    let canon_target = match p.canonicalize() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if canon_target.starts_with(&*root) {
+        return;
+    }
+    if let Some(new_proj_root) = find_project_root_for_path(&canon_target)
+        && new_proj_root != *root
+    {
+        eprintln!(
+            "[layer-mcp] Auto-switching workspace root to: {}",
+            new_proj_root.display()
+        );
+        *root = new_proj_root.clone();
+        g.clear();
+        g.sync_workspace(&new_proj_root);
+    }
+}
+
 fn execute_tool(
     g: &mut VectorGraph,
-    root: &Path,
+    root: &mut PathBuf,
     tool_name: &str,
     args: Option<&serde_json::Value>,
 ) -> String {
     let empty_args = json!({});
     let args = args.unwrap_or(&empty_args);
+
+    if tool_name == "set_workspace" {
+        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+        if path_str.trim().is_empty() {
+            return "Error: Path cannot be empty.".to_string();
+        }
+        let target_path = Path::new(path_str);
+        let target_abs = if target_path.is_absolute() {
+            target_path.to_path_buf()
+        } else {
+            root.join(target_path)
+        };
+
+        let canonical = match target_abs.canonicalize() {
+            Ok(c) => c,
+            Err(e) => return format!("Error: Cannot resolve path '{}': {}", path_str, e),
+        };
+
+        if !canonical.is_dir() {
+            return format!("Error: Target path '{}' is not a directory.", path_str);
+        }
+
+        eprintln!("[layer-mcp] Workspace switched to: {}", canonical.display());
+        *root = canonical.clone();
+        g.clear();
+        g.sync_workspace(&canonical);
+
+        let res = json!({
+            "success": true,
+            "workspace_root": canonical.display().to_string(),
+            "indexed_files": g.files.len(),
+            "indexed_chunks": g.chunks.len(),
+            "message": format!("Workspace successfully switched to '{}'. Indexed {} files.", canonical.display(), g.files.len())
+        });
+        return serde_json::to_string_pretty(&res).unwrap_or_default();
+    }
+
+    // Auto-detect project root if agent supplied an absolute path pointing to a different project
+    let candidate_path = args
+        .get("path")
+        .or_else(|| args.get("file"))
+        .or_else(|| args.get("target_path"))
+        .and_then(|v| v.as_str());
+
+    maybe_switch_workspace_root(root, g, candidate_path);
 
     // Synchronously sync workspace with disk to catch newly created/modified/deleted files
     g.sync_workspace(root);
@@ -851,5 +969,78 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_find_project_root_for_path() {
+        let temp_dir = std::env::temp_dir().join(format!("layer_root_test_{}", std::process::id()));
+        let sub_src = temp_dir.join("src").join("nested");
+        fs::create_dir_all(&sub_src).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+        let file_path = sub_src.join("lib.rs");
+        fs::write(&file_path, "pub fn test() {}").unwrap();
+
+        let detected = find_project_root_for_path(&file_path);
+        assert!(detected.is_some());
+        assert_eq!(
+            detected.unwrap().canonicalize().unwrap(),
+            temp_dir.canonicalize().unwrap()
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_set_workspace_and_auto_switch() {
+        let root_a = std::env::temp_dir().join(format!("layer_ws_a_{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("layer_ws_b_{}", std::process::id()));
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+
+        fs::write(root_a.join("Cargo.toml"), "[package]\nname = \"a\"").unwrap();
+        fs::write(root_a.join("main.rs"), "fn main() { println!(\"A\"); }").unwrap();
+
+        fs::write(root_b.join("Cargo.toml"), "[package]\nname = \"b\"").unwrap();
+        fs::write(root_b.join("b.rs"), "pub fn b_func() {}").unwrap();
+
+        let canon_a = root_a.canonicalize().unwrap();
+        let canon_b = root_b.canonicalize().unwrap();
+
+        let mut current_root = canon_a.clone();
+        let mut graph = VectorGraph::new();
+        graph.sync_workspace(&current_root);
+        assert!(graph.files.contains_key(&PathBuf::from("main.rs")));
+
+        // 1. Explicitly switch workspace to root_b
+        let switch_args = json!({ "path": canon_b.to_str().unwrap() });
+        let switch_res = execute_tool(
+            &mut graph,
+            &mut current_root,
+            "set_workspace",
+            Some(&switch_args),
+        );
+        assert!(switch_res.contains("\"success\": true"));
+        assert_eq!(current_root, canon_b);
+        assert!(graph.files.contains_key(&PathBuf::from("b.rs")));
+        assert!(!graph.files.contains_key(&PathBuf::from("main.rs")));
+
+        // 2. Auto-switch when querying an absolute file in root_a
+        let query_args = json!({
+            "path": canon_a.join("main.rs").to_str().unwrap()
+        });
+        let _ = execute_tool(
+            &mut graph,
+            &mut current_root,
+            "get_skeleton",
+            Some(&query_args),
+        );
+        assert_eq!(
+            current_root, canon_a,
+            "Should have auto-switched to project A"
+        );
+        assert!(graph.files.contains_key(&PathBuf::from("main.rs")));
+
+        let _ = fs::remove_dir_all(&root_a);
+        let _ = fs::remove_dir_all(&root_b);
     }
 }
