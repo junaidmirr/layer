@@ -25,6 +25,7 @@ pub struct VectorGraph {
     pub graph: DiGraph<PathBuf, ()>,
     pub node_indices: HashMap<PathBuf, NodeIndex>,
     pub last_sync: Option<std::time::Instant>,
+    pub last_verification: Option<Vec<crate::verifier::DiagnosticItem>>,
 }
 
 impl Default for VectorGraph {
@@ -56,6 +57,7 @@ impl VectorGraph {
             graph: DiGraph::new(),
             node_indices: HashMap::new(),
             last_sync: None,
+            last_verification: None,
         }
     }
 
@@ -66,6 +68,7 @@ impl VectorGraph {
         self.graph.clear();
         self.node_indices.clear();
         self.last_sync = None;
+        self.last_verification = None;
     }
 
     /// Insert or update a file node and re-index its chunks and graph connections

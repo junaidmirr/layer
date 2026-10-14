@@ -355,6 +355,14 @@ fn handle_rpc_method(
                                 },
                                 "required": ["path"]
                             }
+                        },
+                        {
+                            "name": "verify_project",
+                            "description": "Run native project verification (cargo check for Rust, tsc for TypeScript). Returns structured, compact diagnostics (file, line, code, message) and compares against previous verification to detect newly introduced errors, resolved errors, and persistent errors.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {}
+                            }
                         }
                     ]
                 }
@@ -926,6 +934,12 @@ fn execute_tool(
                 max_tokens,
             );
             serde_json::to_string_pretty(&packet).unwrap_or_default()
+        }
+        "verify_project" => {
+            let report =
+                crate::verifier::Verifier::verify_workspace(root, g.last_verification.as_deref());
+            g.last_verification = Some(report.diagnostics.clone());
+            serde_json::to_string_pretty(&report).unwrap_or_default()
         }
         _ => format!("Unknown tool: {}", tool_name),
     }

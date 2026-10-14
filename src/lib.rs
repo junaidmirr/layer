@@ -7,5 +7,6 @@ pub mod mcp;
 pub mod models;
 pub mod scaffold;
 pub mod scanner;
+pub mod verifier;
 pub mod walker;
 pub mod watcher;
