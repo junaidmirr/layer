@@ -1,4 +1,4 @@
-use layer::graph::{normalize_relative_path, resolve_module_import_path, VectorGraph};
+use layer::graph::{VectorGraph, normalize_relative_path, resolve_module_import_path};
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -35,11 +35,13 @@ fn test_resolve_module_import_path_extensionless_and_aliased() {
 
     // 2. Relative import from child component: ../physics/engine -> src/physics/engine.ts
     let src_component = Path::new("src/components/Canvas.tsx");
-    let resolved2 = resolve_module_import_path(src_component, "../physics/engine", &known_files, &aliases);
+    let resolved2 =
+        resolve_module_import_path(src_component, "../physics/engine", &known_files, &aliases);
     assert_eq!(resolved2, Some(PathBuf::from("src/physics/engine.ts")));
 
     // 3. Aliased import: @/types/simulation -> src/types/simulation.ts
-    let resolved3 = resolve_module_import_path(src_component, "@/types/simulation", &known_files, &aliases);
+    let resolved3 =
+        resolve_module_import_path(src_component, "@/types/simulation", &known_files, &aliases);
     assert_eq!(resolved3, Some(PathBuf::from("src/types/simulation.ts")));
 
     // 4. Index file resolution: @/utils -> src/utils/index.ts
@@ -110,16 +112,33 @@ export const Canvas: React.FC = () => {
     graph.sync_workspace(&temp_dir);
 
     assert!(graph.files.contains_key(&PathBuf::from("src/types.ts")));
-    assert!(graph.files.contains_key(&PathBuf::from("src/physics/engine.ts")));
-    assert!(graph.files.contains_key(&PathBuf::from("src/components/Canvas.tsx")));
+    assert!(
+        graph
+            .files
+            .contains_key(&PathBuf::from("src/physics/engine.ts"))
+    );
+    assert!(
+        graph
+            .files
+            .contains_key(&PathBuf::from("src/components/Canvas.tsx"))
+    );
 
     let types_buf = PathBuf::from("src/types.ts");
     let engine_buf = PathBuf::from("src/physics/engine.ts");
     let canvas_buf = PathBuf::from("src/components/Canvas.tsx");
 
-    let types_idx = *graph.node_indices.get(&types_buf).expect("types.ts indexed");
-    let engine_idx = *graph.node_indices.get(&engine_buf).expect("engine.ts indexed");
-    let canvas_idx = *graph.node_indices.get(&canvas_buf).expect("Canvas.tsx indexed");
+    let types_idx = *graph
+        .node_indices
+        .get(&types_buf)
+        .expect("types.ts indexed");
+    let engine_idx = *graph
+        .node_indices
+        .get(&engine_buf)
+        .expect("engine.ts indexed");
+    let canvas_idx = *graph
+        .node_indices
+        .get(&canvas_buf)
+        .expect("Canvas.tsx indexed");
 
     // Check outgoing edge: engine.ts -> types.ts
     let engine_targets: Vec<_> = graph

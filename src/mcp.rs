@@ -363,6 +363,28 @@ fn handle_rpc_method(
                                 "type": "object",
                                 "properties": {}
                             }
+                        },
+                        {
+                            "name": "bootstrap_project",
+                            "description": "Bootstrap a new project using standard non-interactive ecosystem CLI generators (Vite React-TS, Cargo binary/lib). Guarantees zero overwrites, non-interactive execution with timeout, auto-switches workspace root, and immediately indexes the project. Supported presets: 'react-ts', 'rust-bin', 'rust-lib'.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "preset": {
+                                        "type": "string",
+                                        "description": "Ecosystem preset: 'react-ts', 'rust-bin', 'rust-lib'"
+                                    },
+                                    "project_name": {
+                                        "type": "string",
+                                        "description": "Project name (valid identifier)"
+                                    },
+                                    "destination": {
+                                        "type": "string",
+                                        "description": "Optional destination parent directory (defaults to current workspace root)"
+                                    }
+                                },
+                                "required": ["preset", "project_name"]
+                            }
                         }
                     ]
                 }
@@ -940,6 +962,49 @@ fn execute_tool(
                 crate::verifier::Verifier::verify_workspace(root, g.last_verification.as_deref());
             g.last_verification = Some(report.diagnostics.clone());
             serde_json::to_string_pretty(&report).unwrap_or_default()
+        }
+        "bootstrap_project" => {
+            let preset_str = args.get("preset").and_then(|p| p.as_str()).unwrap_or("");
+            let project_name = args
+                .get("project_name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let dest_parent_str = args
+                .get("destination")
+                .and_then(|d| d.as_str())
+                .unwrap_or(".");
+
+            let preset = match crate::scaffold::GeneratorPreset::parse(preset_str) {
+                Some(p) => p,
+                None => {
+                    return format!(
+                        "Error: Unknown preset '{}'. Supported presets: 'react-ts', 'rust-bin', 'rust-lib'.",
+                        preset_str
+                    );
+                }
+            };
+
+            let dest_parent = match resolve_safe_path(root, dest_parent_str) {
+                Ok(p) => root.join(p),
+                Err(e) => return format!("Error: Invalid destination: {}", e),
+            };
+
+            match crate::scaffold::bootstrap_project(preset, project_name, &dest_parent, g) {
+                Ok(res) => {
+                    let target_path = dest_parent.join(project_name.trim());
+                    if let Ok(canon) = target_path.canonicalize() {
+                        eprintln!(
+                            "[layer-mcp] Auto-switching workspace root to bootstrapped project: {}",
+                            canon.display()
+                        );
+                        *root = canon.clone();
+                        g.clear();
+                        g.sync_workspace(&canon);
+                    }
+                    serde_json::to_string_pretty(&res).unwrap_or_default()
+                }
+                Err(e) => format!("Error: {}", e),
+            }
         }
         _ => format!("Unknown tool: {}", tool_name),
     }

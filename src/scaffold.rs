@@ -1,9 +1,38 @@
 use crate::graph::VectorGraph;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+use std::process::Command;
 
 pub const TEMPLATE_VERSION: &str = "1.0.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeneratorPreset {
+    ReactTs,
+    RustBin,
+    RustLib,
+}
+
+impl GeneratorPreset {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "react-ts" | "vite-react-ts" | "react" | "vite" => Some(Self::ReactTs),
+            "rust-bin" | "cargo-bin" | "rust" | "cargo" => Some(Self::RustBin),
+            "rust-lib" | "cargo-lib" => Some(Self::RustLib),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReactTs => "react-ts",
+            Self::RustBin => "rust-bin",
+            Self::RustLib => "rust-lib",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -172,6 +201,105 @@ pub fn scaffold_project(
             "Successfully scaffolded '{}' ({}) with {} files. Workspace indexed immediately.",
             clean_name,
             template.as_str(),
+            files_synced
+        ),
+    })
+}
+
+/// Bootstrap a project in `dest_parent_dir` using standard non-interactive ecosystem generators.
+/// Executes with timeout, validates safety, and indexes the resulting project into `graph`.
+pub fn bootstrap_project(
+    preset: GeneratorPreset,
+    project_name: &str,
+    dest_parent_dir: &Path,
+    graph: &mut VectorGraph,
+) -> Result<ScaffoldResult, String> {
+    validate_project_name(project_name)?;
+    let clean_name = project_name.trim();
+    let target_dir = dest_parent_dir.join(clean_name);
+    validate_destination(&target_dir)?;
+
+    let (program, args) = match preset {
+        GeneratorPreset::ReactTs => (
+            "npx",
+            vec![
+                "--yes",
+                "create-vite@latest",
+                clean_name,
+                "--template",
+                "react-ts",
+                "--no-interactive",
+            ],
+        ),
+        GeneratorPreset::RustBin => ("cargo", vec!["new", "--bin", clean_name]),
+        GeneratorPreset::RustLib => ("cargo", vec!["new", "--lib", clean_name]),
+    };
+
+    let mut child = Command::new(program)
+        .args(&args)
+        .current_dir(dest_parent_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn ecosystem generator `{}`: {}", program, e))?;
+
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(60);
+    let mut finished = false;
+
+    while start.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                finished = true;
+                if !status.success() {
+                    let mut stderr_str = String::new();
+                    if let Some(mut err_pipe) = child.stderr.take() {
+                        let _ = err_pipe.read_to_string(&mut stderr_str);
+                    }
+                    return Err(format!(
+                        "Generator `{}` failed with exit status {}: {}",
+                        program,
+                        status,
+                        stderr_str.trim()
+                    ));
+                }
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                return Err(format!("Error waiting for generator `{}`: {}", program, e));
+            }
+        }
+    }
+
+    if !finished {
+        let _ = child.kill();
+        return Err(format!("Generator `{}` timed out after 60s", program));
+    }
+
+    // Synchronize workspace immediately with newly created project
+    graph.sync_workspace(&target_dir);
+    let files_synced = graph.files.len();
+    let created_files: Vec<String> = graph
+        .files
+        .keys()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    Ok(ScaffoldResult {
+        success: true,
+        template: preset.as_str().to_string(),
+        template_version: "ecosystem".to_string(),
+        project_name: clean_name.to_string(),
+        destination: target_dir.display().to_string(),
+        created_files,
+        files_synced,
+        message: format!(
+            "Successfully bootstrapped '{}' using {} with {} files. Workspace indexed immediately.",
+            clean_name,
+            preset.as_str(),
             files_synced
         ),
     })
@@ -421,5 +549,57 @@ mod tests {
         if let Ok(st) = status {
             assert!(st.success(), "scaffolded project failed cargo check");
         }
+    }
+
+    #[test]
+    fn test_generator_preset_parsing() {
+        assert_eq!(GeneratorPreset::parse("react-ts"), Some(GeneratorPreset::ReactTs));
+        assert_eq!(GeneratorPreset::parse("vite-react-ts"), Some(GeneratorPreset::ReactTs));
+        assert_eq!(GeneratorPreset::parse("rust-bin"), Some(GeneratorPreset::RustBin));
+        assert_eq!(GeneratorPreset::parse("cargo-bin"), Some(GeneratorPreset::RustBin));
+        assert_eq!(GeneratorPreset::parse("unknown_preset"), None);
+    }
+
+    #[test]
+    fn test_bootstrap_project_rust_bin_and_subsequent_incremental_indexing() {
+        let dir = tempdir().unwrap();
+        let mut graph = VectorGraph::new();
+
+        // 1. Bootstrap project
+        let res = bootstrap_project(
+            GeneratorPreset::RustBin,
+            "bootstrapped_app",
+            dir.path(),
+            &mut graph,
+        )
+        .expect("bootstrap must succeed");
+
+        assert!(res.success);
+        let target_dir = dir.path().join("bootstrapped_app");
+        assert!(target_dir.join("Cargo.toml").exists());
+        assert!(target_dir.join("src").join("main.rs").exists());
+
+        // Verified immediate indexing
+        assert!(graph.files.contains_key(&std::path::PathBuf::from("Cargo.toml")));
+        assert!(graph.files.contains_key(&std::path::PathBuf::from("src/main.rs")));
+
+        // 2. Reject repeat invocation on same destination
+        let repeat = bootstrap_project(
+            GeneratorPreset::RustBin,
+            "bootstrapped_app",
+            dir.path(),
+            &mut graph,
+        );
+        assert!(repeat.is_err(), "Must reject non-empty destination");
+
+        // 3. Add a new file and ensure sync updates graph correctly
+        let util_file = target_dir.join("src").join("utils.rs");
+        fs::write(&util_file, "pub fn helper() -> bool { true }").unwrap();
+
+        graph.sync_workspace(&target_dir);
+        assert!(graph.files.contains_key(&std::path::PathBuf::from("src/utils.rs")));
+        let syms = graph.find_symbol_filtered("helper", None, None);
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].1.name, "helper");
     }
 }
