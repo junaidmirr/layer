@@ -553,10 +553,22 @@ mod tests {
 
     #[test]
     fn test_generator_preset_parsing() {
-        assert_eq!(GeneratorPreset::parse("react-ts"), Some(GeneratorPreset::ReactTs));
-        assert_eq!(GeneratorPreset::parse("vite-react-ts"), Some(GeneratorPreset::ReactTs));
-        assert_eq!(GeneratorPreset::parse("rust-bin"), Some(GeneratorPreset::RustBin));
-        assert_eq!(GeneratorPreset::parse("cargo-bin"), Some(GeneratorPreset::RustBin));
+        assert_eq!(
+            GeneratorPreset::parse("react-ts"),
+            Some(GeneratorPreset::ReactTs)
+        );
+        assert_eq!(
+            GeneratorPreset::parse("vite-react-ts"),
+            Some(GeneratorPreset::ReactTs)
+        );
+        assert_eq!(
+            GeneratorPreset::parse("rust-bin"),
+            Some(GeneratorPreset::RustBin)
+        );
+        assert_eq!(
+            GeneratorPreset::parse("cargo-bin"),
+            Some(GeneratorPreset::RustBin)
+        );
         assert_eq!(GeneratorPreset::parse("unknown_preset"), None);
     }
 
@@ -580,8 +592,16 @@ mod tests {
         assert!(target_dir.join("src").join("main.rs").exists());
 
         // Verified immediate indexing
-        assert!(graph.files.contains_key(&std::path::PathBuf::from("Cargo.toml")));
-        assert!(graph.files.contains_key(&std::path::PathBuf::from("src/main.rs")));
+        assert!(
+            graph
+                .files
+                .contains_key(&std::path::PathBuf::from("Cargo.toml"))
+        );
+        assert!(
+            graph
+                .files
+                .contains_key(&std::path::PathBuf::from("src/main.rs"))
+        );
 
         // 2. Reject repeat invocation on same destination
         let repeat = bootstrap_project(
@@ -597,7 +617,11 @@ mod tests {
         fs::write(&util_file, "pub fn helper() -> bool { true }").unwrap();
 
         graph.sync_workspace(&target_dir);
-        assert!(graph.files.contains_key(&std::path::PathBuf::from("src/utils.rs")));
+        assert!(
+            graph
+                .files
+                .contains_key(&std::path::PathBuf::from("src/utils.rs"))
+        );
         let syms = graph.find_symbol_filtered("helper", None, None);
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].1.name, "helper");

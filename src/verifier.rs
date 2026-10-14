@@ -347,10 +347,17 @@ impl Verifier {
     }
 
     fn verify_typescript(root: &Path, previous: Option<&[DiagnosticItem]>) -> VerificationReport {
-        // Look for local tsc in node_modules or system tsc / npx tsc
         let local_tsc = root.join("node_modules").join(".bin").join("tsc");
+        let use_build_mode = root.join("tsconfig.app.json").exists();
         let (cmd, args): (&str, Vec<&str>) = if local_tsc.exists() {
-            (local_tsc.to_str().unwrap_or("tsc"), vec!["--noEmit"])
+            let tsc_bin = local_tsc.to_str().unwrap_or("tsc");
+            if use_build_mode {
+                (tsc_bin, vec!["-b"])
+            } else {
+                (tsc_bin, vec!["--noEmit"])
+            }
+        } else if use_build_mode {
+            ("npx", vec!["--no-install", "tsc", "-b"])
         } else {
             ("npx", vec!["--no-install", "tsc", "--noEmit"])
         };
