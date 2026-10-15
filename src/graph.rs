@@ -1872,10 +1872,9 @@ pub fn resolve_python_import_path(
     // Parse "from <mod> import ..." or "import <mod>"
     let mod_part = if let Some(after_from) = trimmed.strip_prefix("from ") {
         after_from.split_whitespace().next()?
-    } else if let Some(after_import) = trimmed.strip_prefix("import ") {
-        after_import.split([',', ' ']).next()?
     } else {
-        return None;
+        let after_import = trimmed.strip_prefix("import ")?;
+        after_import.split([',', ' ']).next()?
     };
 
     let parent = source_path.parent().unwrap_or(Path::new(""));
@@ -2005,9 +2004,6 @@ pub fn resolve_java_import_path(
     known_files: &HashSet<PathBuf>,
 ) -> Option<PathBuf> {
     let trimmed = import.trim();
-    if !trimmed.starts_with("import ") {
-        return None;
-    }
     let rest = trimmed.strip_prefix("import ")?.trim();
     let rest = rest.strip_prefix("static ").unwrap_or(rest).trim();
     let clean = rest.trim_end_matches(';').trim();
@@ -2061,9 +2057,6 @@ pub fn resolve_csharp_import_path(
     known_files: &HashSet<PathBuf>,
 ) -> Option<PathBuf> {
     let trimmed = import.trim();
-    if !trimmed.starts_with("using ") {
-        return None;
-    }
     let rest = trimmed.strip_prefix("using ")?.trim();
     let rest = rest.strip_prefix("static ").unwrap_or(rest).trim();
     let clean = rest.trim_end_matches(';').trim();
