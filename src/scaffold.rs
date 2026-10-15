@@ -319,8 +319,9 @@ fn try_npm_install(target_dir: &Path, packages: Option<&[String]>) -> Option<Str
     match Command::new("npm")
         .args(&npm_args)
         .current_dir(target_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
         Ok(mut npm_child) => {
@@ -338,11 +339,13 @@ fn try_npm_install(target_dir: &Path, packages: Option<&[String]>) -> Option<Str
                     }
                     Err(_) => {
                         let _ = npm_child.kill();
+                        let _ = npm_child.wait();
                         return Some(offline_note);
                     }
                 }
             }
             let _ = npm_child.kill();
+            let _ = npm_child.wait();
             Some(offline_note)
         }
         Err(_) => Some(offline_note),
@@ -365,8 +368,9 @@ fn try_cargo_add(target_dir: &Path, packages: &[String]) -> Option<String> {
     if let Ok(mut cargo_child) = Command::new("cargo")
         .args(&cargo_args)
         .current_dir(target_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
         while cargo_start.elapsed() < cargo_timeout {
@@ -383,11 +387,13 @@ fn try_cargo_add(target_dir: &Path, packages: &[String]) -> Option<String> {
                 }
                 Err(_) => {
                     let _ = cargo_child.kill();
+                    let _ = cargo_child.wait();
                     return Some(offline_note);
                 }
             }
         }
         let _ = cargo_child.kill();
+        let _ = cargo_child.wait();
         Some(offline_note)
     } else {
         Some(offline_note)
@@ -401,6 +407,24 @@ pub fn bootstrap_project(
     project_name: &str,
     dest_parent_dir: &Path,
     packages: Option<Vec<String>>,
+    graph: &mut VectorGraph,
+) -> Result<ScaffoldResult, String> {
+    bootstrap_project_with_options(
+        preset,
+        project_name,
+        dest_parent_dir,
+        packages,
+        false,
+        graph,
+    )
+}
+
+pub fn bootstrap_project_with_options(
+    preset: GeneratorPreset,
+    project_name: &str,
+    dest_parent_dir: &Path,
+    packages: Option<Vec<String>>,
+    install_dependencies: bool,
     graph: &mut VectorGraph,
 ) -> Result<ScaffoldResult, String> {
     validate_project_name(project_name)?;
@@ -529,7 +553,9 @@ pub fn bootstrap_project(
             )
             .map_err(|e| format!("Failed to write app/page.tsx: {}", e))?;
 
-            warning_note = try_npm_install(&target_dir, packages.as_deref());
+            if install_dependencies {
+                warning_note = try_npm_install(&target_dir, packages.as_deref());
+            }
         }
         GeneratorPreset::ReactTs => {
             fs::create_dir_all(&target_dir)
@@ -635,7 +661,9 @@ pub fn bootstrap_project(
             )
             .map_err(|e| format!("Failed to write src/main.tsx: {}", e))?;
 
-            warning_note = try_npm_install(&target_dir, packages.as_deref());
+            if install_dependencies {
+                warning_note = try_npm_install(&target_dir, packages.as_deref());
+            }
         }
         GeneratorPreset::Custom(ref custom_name) => {
             fs::create_dir_all(&target_dir)
@@ -674,25 +702,49 @@ pub fn bootstrap_project(
             fs::write(target_dir.join("README.md"), readme)
                 .map_err(|e| format!("Failed to write README.md: {}", e))?;
 
-            warning_note = try_npm_install(&target_dir, packages.as_deref());
+            if install_dependencies {
+                warning_note = try_npm_install(&target_dir, packages.as_deref());
+            }
         }
         GeneratorPreset::RustBin | GeneratorPreset::RustLib => {
-            let flag = if preset == GeneratorPreset::RustBin {
-                "--bin"
-            } else {
-                "--lib"
-            };
-            let status = Command::new("cargo")
-                .args(["new", flag, clean_name])
-                .current_dir(dest_parent_dir)
-                .status()
-                .map_err(|e| format!("Failed to spawn cargo new: {}", e))?;
+            fs::create_dir_all(&target_dir)
+                .map_err(|e| format!("Failed to create project dir: {}", e))?;
+            let src_dir = target_dir.join("src");
+            fs::create_dir_all(&src_dir).map_err(|e| format!("Failed to create src dir: {}", e))?;
 
-            if !status.success() {
-                return Err(format!("cargo new exited with status {}", status));
+            let mut deps_str = String::new();
+            if let Some(ref pkgs) = packages {
+                for p in pkgs {
+                    let trimmed = p.trim();
+                    if !trimmed.is_empty() {
+                        deps_str.push_str(&format!("{} = \"*\"\n", trimmed));
+                    }
+                }
             }
 
-            if let Some(ref pkgs) = packages
+            let cargo_toml = format!(
+                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{}",
+                clean_name, deps_str
+            );
+            fs::write(target_dir.join("Cargo.toml"), cargo_toml)
+                .map_err(|e| format!("Failed to write Cargo.toml: {}", e))?;
+
+            if preset == GeneratorPreset::RustBin {
+                fs::write(
+                    src_dir.join("main.rs"),
+                    "fn main() {\n    println!(\"Hello, world!\");\n}\n",
+                )
+                .map_err(|e| format!("Failed to write src/main.rs: {}", e))?;
+            } else {
+                fs::write(
+                    src_dir.join("lib.rs"),
+                    "pub fn add(left: u64, right: u64) -> u64 {\n    left + right\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn it_works() {\n        let result = add(2, 2);\n        assert_eq!(result, 4);\n    }\n}\n",
+                )
+                .map_err(|e| format!("Failed to write src/lib.rs: {}", e))?;
+            }
+
+            if install_dependencies
+                && let Some(ref pkgs) = packages
                 && !pkgs.is_empty()
             {
                 warning_note = try_cargo_add(&target_dir, pkgs);
@@ -1313,6 +1365,9 @@ mod tests {
         let status = std::process::Command::new("cargo")
             .arg("check")
             .current_dir(&target_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .status();
 
         if let Ok(st) = status {

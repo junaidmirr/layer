@@ -1019,6 +1019,7 @@ impl Verifier {
                 let jest = target_root.join("node_modules/.bin/jest");
                 if vitest.exists() {
                     let mut cmd = Command::new(&vitest);
+                    cmd.stdin(std::process::Stdio::null());
                     cmd.arg("run").current_dir(&target_root);
                     for p in &impacted_paths {
                         cmd.arg(p);
@@ -1029,6 +1030,7 @@ impl Verifier {
                     }
                 } else if jest.exists() {
                     let mut cmd = Command::new(&jest);
+                    cmd.stdin(std::process::Stdio::null());
                     cmd.current_dir(&target_root);
                     for p in &impacted_paths {
                         cmd.arg(p);
@@ -1050,6 +1052,7 @@ impl Verifier {
                 }
                 if !rust_test_names.is_empty() {
                     let mut cmd = Command::new("cargo");
+                    cmd.stdin(std::process::Stdio::null());
                     cmd.arg("test").current_dir(&target_root);
                     for name in &rust_test_names {
                         cmd.args(["--test", name]);
@@ -1064,7 +1067,12 @@ impl Verifier {
                 let pytest = target_root.join(".venv/bin/pytest");
                 let runner = if pytest.exists() {
                     Some(pytest)
-                } else if Command::new("pytest").arg("--version").output().is_ok() {
+                } else if Command::new("pytest")
+                    .arg("--version")
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .is_ok()
+                {
                     Some(PathBuf::from("pytest"))
                 } else {
                     None
@@ -1072,6 +1080,7 @@ impl Verifier {
 
                 if let Some(bin) = runner {
                     let mut cmd = Command::new(bin);
+                    cmd.stdin(std::process::Stdio::null());
                     cmd.current_dir(&target_root);
                     for p in &impacted_paths {
                         cmd.arg(p);
@@ -1091,6 +1100,7 @@ impl Verifier {
                 }
                 if !pkgs.is_empty() {
                     let mut cmd = Command::new("go");
+                    cmd.stdin(std::process::Stdio::null());
                     cmd.arg("test").current_dir(&target_root);
                     for pkg in &pkgs {
                         cmd.arg(format!("./{}", pkg));
@@ -1154,6 +1164,7 @@ impl Verifier {
             .arg("check")
             .arg("--message-format=json")
             .current_dir(root)
+            .stdin(std::process::Stdio::null())
             .output()
         {
             Ok(out) => out,
@@ -1320,7 +1331,12 @@ impl Verifier {
             ]
         };
 
-        let output = match Command::new(tsc_bin).args(&args).current_dir(root).output() {
+        let output = match Command::new(tsc_bin)
+            .args(&args)
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
             Ok(out) => out,
             Err(e) => {
                 let err_msg = format!("Failed to invoke TypeScript compiler `{}`: {}", tsc_bin, e);
@@ -1481,6 +1497,7 @@ impl Verifier {
             .arg("check")
             .arg("--output-format=json")
             .current_dir(root)
+            .stdin(std::process::Stdio::null())
             .output();
 
         if let Ok(out) = ruff_cmd
@@ -1549,6 +1566,7 @@ impl Verifier {
             && let Ok(out) = Command::new("go")
                 .args(["vet", "./..."])
                 .current_dir(root)
+                .stdin(std::process::Stdio::null())
                 .output()
         {
             let stderr = String::from_utf8_lossy(&out.stderr);

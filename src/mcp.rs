@@ -1,6 +1,6 @@
 use crate::graph::VectorGraph;
 use serde_json::json;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -32,37 +32,146 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
             continue;
         }
 
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(val) => {
-                if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
-                    let id = val.get("id").cloned();
-                    if let Err(e) = handle_rpc_method(
+        let json_str = if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+            let len: usize = match trimmed
+                .split(':')
+                .nth(1)
+                .and_then(|s| s.trim().parse().ok())
+            {
+                Some(l) => l,
+                None => {
+                    eprintln!("[layer-mcp] Invalid Content-Length header: {}", trimmed);
+                    continue;
+                }
+            };
+            // Read headers until blank line
+            let mut blank_found = false;
+            while !blank_found {
+                line.clear();
+                if reader.read_line(&mut line)? == 0 {
+                    return Ok(());
+                }
+                if line.trim().is_empty() {
+                    blank_found = true;
+                }
+            }
+            // Read exactly len bytes
+            let mut body_buf = vec![0u8; len];
+            reader.read_exact(&mut body_buf)?;
+            match String::from_utf8(body_buf) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[layer-mcp] Non-utf8 body: {}", e);
+                    continue;
+                }
+            }
+        } else {
+            trimmed.to_string()
+        };
+
+        match serde_json::from_str::<serde_json::Value>(&json_str) {
+            Ok(serde_json::Value::Array(items)) => {
+                for val in items {
+                    if let Err(e) = dispatch_jsonrpc_value(
                         &graph,
                         &mut root,
-                        method,
-                        id,
-                        val.get("params"),
+                        val,
                         &mut writer,
                         &mut recent_queries,
                         &mut pkg_indexer,
                     ) {
-                        eprintln!("[layer-mcp] RPC method error: {}", e);
+                        eprintln!("[layer-mcp] RPC dispatch error: {}", e);
                         if e.kind() == io::ErrorKind::BrokenPipe {
-                            break;
+                            return Ok(());
                         }
+                    }
+                }
+            }
+            Ok(val) => {
+                if let Err(e) = dispatch_jsonrpc_value(
+                    &graph,
+                    &mut root,
+                    val,
+                    &mut writer,
+                    &mut recent_queries,
+                    &mut pkg_indexer,
+                ) {
+                    eprintln!("[layer-mcp] RPC dispatch error: {}", e);
+                    if e.kind() == io::ErrorKind::BrokenPipe {
+                        return Ok(());
                     }
                 }
             }
             Err(err) => {
                 eprintln!(
-                    "[layer-mcp] Warning: Received invalid JSON line: {} ({})",
-                    trimmed, err
+                    "[layer-mcp] Warning: Received invalid JSON: {} ({})",
+                    json_str, err
                 );
             }
         }
     }
 
     Ok(())
+}
+
+fn dispatch_jsonrpc_value(
+    graph: &Arc<Mutex<VectorGraph>>,
+    root: &mut PathBuf,
+    val: serde_json::Value,
+    writer: &mut io::StdoutLock,
+    recent_queries: &mut Vec<String>,
+    pkg_indexer: &mut crate::package_indexer::PackageIndexer,
+) -> io::Result<()> {
+    if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
+        let id = val.get("id").cloned();
+        let params = val.get("params");
+        let method_str = method.to_string();
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_rpc_method(
+                graph,
+                root,
+                &method_str,
+                id.clone(),
+                params,
+                writer,
+                recent_queries,
+                pkg_indexer,
+            )
+        }));
+
+        match res {
+            Ok(io_res) => io_res,
+            Err(panic_payload) => {
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown internal panic".to_string()
+                };
+                eprintln!(
+                    "[layer-mcp] Caught panic during method '{}': {}",
+                    method_str, panic_msg
+                );
+                if let Some(id_val) = id {
+                    let err_resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": id_val,
+                        "error": {
+                            "code": -32603,
+                            "message": format!("Internal server error: {}", panic_msg)
+                        }
+                    });
+                    send_json_line(writer, &err_resp)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -398,13 +507,13 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "bootstrap_project",
-                            "description": "Bootstrap a new project using standard non-interactive ecosystem CLI generators (Vite React-TS, Cargo binary/lib, Python, Go, C++, Swift, Kotlin, C#, Java). Guarantees zero overwrites, non-interactive execution with timeout, auto-switches workspace root, and immediately indexes the project. Supported presets: 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'.",
+                            "description": "Bootstrap a new project using standard zero-overhead pure Rust generators (Next.js, Vite React-TS, Cargo binary/lib, Python, Go, C++, Swift, Kotlin, C#, Java). Guarantees zero overwrites, instant sub-5ms file generation by default, auto-switches workspace root, and immediately indexes the project. Supported presets: 'nextjs', 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "preset": {
                                         "type": "string",
-                                        "description": "Ecosystem preset: 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'"
+                                        "description": "Ecosystem preset: 'nextjs', 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'"
                                     },
                                     "project_name": {
                                         "type": "string",
@@ -417,7 +526,11 @@ fn handle_rpc_method(
                                     "packages": {
                                         "type": "array",
                                         "items": { "type": "string" },
-                                        "description": "Optional initial packages to install immediately using fast non-blocking flags (e.g. ['three', '@react-three/fiber', '@react-three/drei'])"
+                                        "description": "Optional initial packages to declare (e.g. ['three', '@react-three/fiber', '@react-three/drei'])"
+                                    },
+                                    "install_dependencies": {
+                                        "type": "boolean",
+                                        "description": "Optional: whether to attempt running package managers (npm install, cargo add) immediately. Defaults to false for instant zero-subprocess scaffolding."
                                     }
                                 }
                             },
@@ -1579,12 +1692,17 @@ pub fn execute_tool(
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect()
                 });
+            let install_dependencies = args
+                .get("install_dependencies")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-            match crate::scaffold::bootstrap_project(
+            match crate::scaffold::bootstrap_project_with_options(
                 preset,
                 project_name,
                 &dest_parent,
                 packages,
+                install_dependencies,
                 g,
             ) {
                 Ok(res) => {
