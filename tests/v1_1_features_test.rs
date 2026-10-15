@@ -215,3 +215,225 @@ fn test_telemetry_roi_tracking_and_stats() {
     assert!(dashboard.contains("rename_symbol"));
     assert!(dashboard.contains("verify_impacted_tests"));
 }
+
+#[test]
+fn test_invariant_1_top_down_coding_never_rolls_back_on_missing_imports() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    // 1. Agent writes app/layout.tsx importing uncreated sibling ./globals.css and ./components/BulbScene
+    let layout_content = r#"import React from 'react';
+import './globals.css';
+import { BulbScene } from './components/BulbScene';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+    return <html><body><BulbScene />{children}</body></html>;
+}
+"#;
+    let res = MutationManager::write_file(
+        root,
+        std::path::Path::new("app/layout.tsx"),
+        layout_content,
+        VerifyMode::Fast,
+        true, // auto_rollback_on_cascade = true
+        &mut graph,
+        Some(&mut pkg_indexer),
+    )
+    .expect("write_file must succeed");
+
+    // Invariant 1 Assertions:
+    // File was preserved on disk (rolled_back: false, success: true)
+    assert!(res.success);
+    assert!(root.join("app/layout.tsx").exists());
+    assert!(res.circuit_breaker.is_none() || !res.circuit_breaker.unwrap().rolled_back);
+    // Missing imports were extracted for top-down workflow
+    assert!(!res.missing_imports_to_create_next.is_empty());
+    assert!(
+        res.missing_imports_to_create_next
+            .contains(&"./globals.css".to_string())
+    );
+    assert!(
+        res.missing_imports_to_create_next
+            .contains(&"./components/BulbScene".to_string())
+    );
+
+    // 2. An edit introducing an actual Tree-sitter AST syntax error MUST still roll back!
+    let syntax_err_content = r#"export function broken() { const x = ; return x; }"#;
+    let err_res = MutationManager::write_file(
+        root,
+        std::path::Path::new("app/syntax_err.ts"),
+        syntax_err_content,
+        VerifyMode::Fast,
+        true,
+        &mut graph,
+        Some(&mut pkg_indexer),
+    )
+    .expect("write_file returns mutation result");
+
+    assert!(!err_res.success);
+    assert!(err_res.circuit_breaker.is_some());
+    let cb = err_res.circuit_breaker.unwrap();
+    assert!(cb.rolled_back);
+    assert!(!root.join("app/syntax_err.ts").exists());
+}
+
+#[test]
+fn test_invariant_2_instant_native_scaffolding_nextjs_and_react_and_custom() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+
+    // 1. Next.js instant native scaffolding (<10ms)
+    let start_next = std::time::Instant::now();
+    let next_res = layer::scaffold::bootstrap_project(
+        layer::scaffold::GeneratorPreset::NextJs,
+        "my_next_app",
+        root,
+        Some(vec!["lucide-react".to_string()]),
+        &mut graph,
+    )
+    .expect("bootstrap_project nextjs must succeed");
+    let next_elapsed = start_next.elapsed();
+
+    assert!(next_res.success);
+    assert!(next_elapsed.as_millis() < 3500); // instant generation
+    let next_dir = root.join("my_next_app");
+    assert!(next_dir.join("package.json").exists());
+    assert!(next_dir.join("tsconfig.json").exists());
+    assert!(next_dir.join("next.config.ts").exists());
+    assert!(next_dir.join("postcss.config.mjs").exists());
+    assert!(next_dir.join("app/globals.css").exists());
+    assert!(next_dir.join("app/layout.tsx").exists());
+    assert!(next_dir.join("app/page.tsx").exists());
+
+    // Check dependency injection
+    let pkg_json = fs::read_to_string(next_dir.join("package.json")).unwrap();
+    assert!(pkg_json.contains("lucide-react"));
+    assert!(pkg_json.contains("next"));
+    assert!(pkg_json.contains("tailwindcss"));
+
+    // 2. React-TS instant native scaffolding
+    let react_res = layer::scaffold::bootstrap_project(
+        layer::scaffold::GeneratorPreset::ReactTs,
+        "my_react_app",
+        root,
+        None,
+        &mut graph,
+    )
+    .expect("bootstrap_project react-ts must succeed");
+    assert!(react_res.success);
+    let react_dir = root.join("my_react_app");
+    assert!(react_dir.join("package.json").exists());
+    assert!(react_dir.join("vite.config.ts").exists());
+    assert!(react_dir.join("src/App.tsx").exists());
+    assert!(react_dir.join("src/main.tsx").exists());
+
+    // 3. Custom / fallback preset
+    let custom_preset = layer::scaffold::GeneratorPreset::parse_or_custom("svelte");
+    let custom_res =
+        layer::scaffold::bootstrap_project(custom_preset, "my_svelte_app", root, None, &mut graph)
+            .expect("bootstrap_project custom preset must succeed");
+    assert!(custom_res.success);
+    let custom_dir = root.join("my_svelte_app");
+    assert!(custom_dir.join("README.md").exists());
+    assert!(custom_dir.join("package.json").exists());
+}
+
+#[test]
+fn test_invariant_3_idempotent_path_normalizer() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("my-awesome-app");
+    fs::create_dir_all(&root).unwrap();
+
+    // 1. Path starting with redundant folder name "my-awesome-app/app/page.tsx"
+    // when root is already ".../my-awesome-app"
+    let resolved = layer::mcp::resolve_safe_path(&root, "my-awesome-app/app/page.tsx")
+        .expect("must resolve safely");
+    assert_eq!(resolved, std::path::PathBuf::from("app/page.tsx"));
+
+    // 2. Redundant leading name with ./
+    let resolved_dot = layer::mcp::resolve_safe_path(&root, "./my-awesome-app/src/index.ts")
+        .expect("must resolve safely");
+    assert_eq!(resolved_dot, std::path::PathBuf::from("src/index.ts"));
+
+    // 3. Exact folder name "my-awesome-app" maps to "."
+    let resolved_self =
+        layer::mcp::resolve_safe_path(&root, "my-awesome-app").expect("must resolve safely");
+    assert_eq!(resolved_self, std::path::PathBuf::from(""));
+
+    // 4. Normal path without redundant prefix is untouched
+    let resolved_normal =
+        layer::mcp::resolve_safe_path(&root, "app/layout.tsx").expect("must resolve safely");
+    assert_eq!(resolved_normal, std::path::PathBuf::from("app/layout.tsx"));
+}
+
+#[test]
+fn test_invariant_4_graceful_package_inspection_and_honest_telemetry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    // 1. Inspect Next.js fallbacks
+    let next_summary = pkg_indexer
+        .inspect_package(root, "next/link", Some("Link"), None)
+        .expect("next/link must resolve from built-in fallbacks");
+    assert_eq!(next_summary.package, "next/link");
+    assert!(next_summary.requested_symbol.is_some());
+
+    // 2. Inspect TailwindCSS fallback
+    let tailwind_summary = pkg_indexer
+        .inspect_package(root, "tailwindcss", Some("Config"), None)
+        .expect("tailwindcss must resolve");
+    assert_eq!(tailwind_summary.package, "tailwindcss");
+
+    // 3. Inspect Framer Motion fallback
+    let motion_summary = pkg_indexer
+        .inspect_package(root, "framer-motion", Some("motion"), None)
+        .expect("framer-motion must resolve");
+    assert_eq!(motion_summary.package, "framer-motion");
+
+    // 4. Inspect Zustand fallback
+    let zustand_summary = pkg_indexer
+        .inspect_package(root, "zustand", Some("create"), None)
+        .expect("zustand must resolve");
+    assert_eq!(zustand_summary.package, "zustand");
+
+    // 5. Test MCP inspect_package_api with unindexed/offline package
+    let mut graph = VectorGraph::new();
+    let mut root_buf = root.to_path_buf();
+    let inspect_args = serde_json::json!({
+        "package_name": "some-obscure-uninstalled-pkg-xyz",
+    });
+    let result_json = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "inspect_package_api",
+        Some(&inspect_args),
+        &mut pkg_indexer,
+    );
+
+    // Must return structured JSON with "status": "unindexed_offline" instead of MCP error string
+    assert!(!result_json.starts_with("Error:"));
+    let parsed: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+    assert_eq!(parsed["status"], "unindexed_offline");
+    assert_eq!(parsed["package"], "some-obscure-uninstalled-pkg-xyz");
+
+    // 6. Test Honest Telemetry: unindexed_offline does NOT increment package_apis_inspected or credit tokens
+    let mut tracker = TelemetryTracker::new();
+    let initial_calls = tracker.total_tool_calls;
+    let initial_apis = tracker.package_apis_inspected;
+    let initial_tokens = tracker.estimated_tokens_saved;
+
+    // Simulate resolved inspection:
+    tracker.record_tool_call("inspect_package_api", 10, 2500, 1);
+    assert_eq!(tracker.package_apis_inspected, initial_apis + 1);
+    assert_eq!(tracker.estimated_tokens_saved, initial_tokens + 2500);
+
+    // Simulate unindexed_offline inspection (0 tokens saved):
+    tracker.record_tool_call("inspect_package_api", 5, 0, 0);
+    assert_eq!(tracker.package_apis_inspected, initial_apis + 1); // Not incremented!
+    assert_eq!(tracker.estimated_tokens_saved, initial_tokens + 2500); // Not credited!
+    assert_eq!(tracker.total_tool_calls, initial_calls + 2);
+}

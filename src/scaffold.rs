@@ -1,15 +1,15 @@
 use crate::graph::VectorGraph;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
 pub const TEMPLATE_VERSION: &str = "1.0.0";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GeneratorPreset {
+    NextJs,
     ReactTs,
     RustBin,
     RustLib,
@@ -20,12 +20,15 @@ pub enum GeneratorPreset {
     Kotlin,
     CSharp,
     Java,
+    Custom(String),
 }
 
 impl GeneratorPreset {
     pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().as_str() {
-            "react-ts" | "vite-react-ts" | "react" | "vite" => Some(Self::ReactTs),
+        let trimmed = s.trim();
+        match trimmed.to_lowercase().as_str() {
+            "next" | "nextjs" | "next-js" | "next-ts" | "nextjs-ts" => Some(Self::NextJs),
+            "react-ts" | "vite-react-ts" | "react" | "vite" | "vite-ts" => Some(Self::ReactTs),
             "rust-bin" | "cargo-bin" | "rust" | "cargo" => Some(Self::RustBin),
             "rust-lib" | "cargo-lib" => Some(Self::RustLib),
             "python" | "py" | "python-app" | "fastapi" => Some(Self::Python),
@@ -35,12 +38,18 @@ impl GeneratorPreset {
             "kotlin" | "kt" => Some(Self::Kotlin),
             "csharp" | "cs" | "dotnet" => Some(Self::CSharp),
             "java" | "spring" | "maven" | "gradle" => Some(Self::Java),
+            "custom" => Some(Self::Custom("custom".to_string())),
             _ => None,
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub fn parse_or_custom(s: &str) -> Self {
+        Self::parse(s).unwrap_or_else(|| Self::Custom(s.trim().to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
         match self {
+            Self::NextJs => "nextjs",
             Self::ReactTs => "react-ts",
             Self::RustBin => "rust-bin",
             Self::RustLib => "rust-lib",
@@ -51,6 +60,7 @@ impl GeneratorPreset {
             Self::Kotlin => "kotlin",
             Self::CSharp => "csharp",
             Self::Java => "java",
+            Self::Custom(s) => s.as_str(),
         }
     }
 }
@@ -86,6 +96,8 @@ pub struct ScaffoldResult {
     pub created_files: Vec<String>,
     pub files_synced: usize,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,7 +291,107 @@ pub fn scaffold_project(
             template.as_str(),
             files_synced
         ),
+        environment_note: None,
     })
+}
+
+fn try_npm_install(target_dir: &Path, packages: Option<&[String]>) -> Option<String> {
+    let offline_note = "Offline/sandboxed environment detected: skipped network package install. Do NOT run 'npm install' in bash (it will hang); proceed directly with Layer tools.".to_string();
+
+    let mut npm_args = vec![
+        "install".to_string(),
+        "--prefer-offline".to_string(),
+        "--no-audit".to_string(),
+        "--no-fund".to_string(),
+    ];
+    if let Some(pkgs) = packages {
+        for pkg in pkgs {
+            let p = pkg.trim();
+            if !p.is_empty() {
+                npm_args.push(p.to_string());
+            }
+        }
+    }
+
+    let npm_start = std::time::Instant::now();
+    let npm_timeout = std::time::Duration::from_secs(3);
+
+    match Command::new("npm")
+        .args(&npm_args)
+        .current_dir(target_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut npm_child) => {
+            while npm_start.elapsed() < npm_timeout {
+                match npm_child.try_wait() {
+                    Ok(Some(status)) => {
+                        if status.success() {
+                            return None;
+                        } else {
+                            return Some(offline_note);
+                        }
+                    }
+                    Ok(None) => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(_) => {
+                        let _ = npm_child.kill();
+                        return Some(offline_note);
+                    }
+                }
+            }
+            let _ = npm_child.kill();
+            Some(offline_note)
+        }
+        Err(_) => Some(offline_note),
+    }
+}
+
+fn try_cargo_add(target_dir: &Path, packages: &[String]) -> Option<String> {
+    let offline_note = "Offline/sandboxed environment detected: skipped network package install. Do NOT run 'cargo add' in bash (it will hang); proceed directly with Layer tools.".to_string();
+
+    let mut cargo_args = vec!["add".to_string()];
+    for pkg in packages {
+        let p = pkg.trim();
+        if !p.is_empty() {
+            cargo_args.push(p.to_string());
+        }
+    }
+    let cargo_start = std::time::Instant::now();
+    let cargo_timeout = std::time::Duration::from_secs(3);
+
+    if let Ok(mut cargo_child) = Command::new("cargo")
+        .args(&cargo_args)
+        .current_dir(target_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        while cargo_start.elapsed() < cargo_timeout {
+            match cargo_child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return None;
+                    } else {
+                        return Some(offline_note);
+                    }
+                }
+                Ok(None) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => {
+                    let _ = cargo_child.kill();
+                    return Some(offline_note);
+                }
+            }
+        }
+        let _ = cargo_child.kill();
+        Some(offline_note)
+    } else {
+        Some(offline_note)
+    }
 }
 
 /// Bootstrap a project in `dest_parent_dir` using standard non-interactive ecosystem generators.
@@ -299,162 +411,291 @@ pub fn bootstrap_project(
     let mut warning_note: Option<String> = None;
 
     match preset {
-        GeneratorPreset::ReactTs | GeneratorPreset::RustBin | GeneratorPreset::RustLib => {
-            let (program, args) = match preset {
-                GeneratorPreset::ReactTs => (
-                    "npx",
-                    vec![
-                        "--yes",
-                        "create-vite@latest",
-                        clean_name,
-                        "--template",
-                        "react-ts",
-                        "--no-interactive",
-                    ],
-                ),
-                GeneratorPreset::RustBin => ("cargo", vec!["new", "--bin", clean_name]),
-                GeneratorPreset::RustLib => ("cargo", vec!["new", "--lib", clean_name]),
-                _ => unreachable!(),
-            };
+        GeneratorPreset::NextJs => {
+            fs::create_dir_all(&target_dir)
+                .map_err(|e| format!("Failed to create project dir: {}", e))?;
+            let app_dir = target_dir.join("app");
+            fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create app dir: {}", e))?;
 
-            let mut child = Command::new(program)
-                .args(&args)
-                .current_dir(dest_parent_dir)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to spawn ecosystem generator `{}`: {}", program, e))?;
-
-            let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(60);
-            let mut finished = false;
-
-            while start.elapsed() < timeout {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        finished = true;
-                        if !status.success() {
-                            let mut stderr_str = String::new();
-                            if let Some(mut err_pipe) = child.stderr.take() {
-                                let _ = err_pipe.read_to_string(&mut stderr_str);
-                            }
-                            return Err(format!(
-                                "Generator `{}` failed with exit status {}: {}",
-                                program,
-                                status,
-                                stderr_str.trim()
-                            ));
-                        }
-                        break;
-                    }
-                    Ok(None) => {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    Err(e) => {
-                        return Err(format!("Error waiting for generator `{}`: {}", program, e));
-                    }
-                }
-            }
-
-            if !finished {
-                let _ = child.kill();
-                return Err(format!("Generator `{}` timed out after 60s", program));
-            }
-
-            if preset == GeneratorPreset::ReactTs {
-                let mut npm_args = vec![
-                    "install".to_string(),
-                    "--legacy-peer-deps".to_string(),
-                    "--prefer-offline".to_string(),
-                    "--no-audit".to_string(),
-                    "--no-fund".to_string(),
-                ];
-                if let Some(ref pkgs) = packages {
-                    for pkg in pkgs {
-                        let p = pkg.trim();
-                        if !p.is_empty() {
-                            npm_args.push(p.to_string());
-                        }
-                    }
-                }
-
-                let npm_start = std::time::Instant::now();
-                let npm_timeout = std::time::Duration::from_secs(45);
-
-                if let Ok(mut npm_child) = Command::new("npm")
-                    .args(&npm_args)
-                    .current_dir(&target_dir)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    let mut npm_done = false;
-                    while npm_start.elapsed() < npm_timeout {
-                        match npm_child.try_wait() {
-                            Ok(Some(status)) => {
-                                npm_done = true;
-                                if !status.success() {
-                                    let mut err_str = String::new();
-                                    if let Some(mut err_pipe) = npm_child.stderr.take() {
-                                        let _ = err_pipe.read_to_string(&mut err_str);
-                                    }
-                                    warning_note = Some(format!(
-                                        "npm install exited with status {}: {}",
-                                        status,
-                                        err_str.lines().next().unwrap_or("unknown error").trim()
-                                    ));
-                                }
-                                break;
-                            }
-                            Ok(None) => {
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                            }
-                            Err(e) => {
-                                warning_note = Some(format!("Error waiting for npm: {}", e));
-                                break;
-                            }
-                        }
-                    }
-                    if !npm_done {
-                        let _ = npm_child.kill();
-                        warning_note = Some(
-                            "npm install timed out after 45s (offline/sandboxed mode active)"
-                                .to_string(),
+            let mut deps = serde_json::json!({
+                "next": "^15.1.0",
+                "react": "^19.0.0",
+                "react-dom": "^19.0.0"
+            });
+            if let Some(ref pkgs) = packages
+                && let Some(obj) = deps.as_object_mut()
+            {
+                for p in pkgs {
+                    let trimmed = p.trim();
+                    if !trimmed.is_empty() && !obj.contains_key(trimmed) {
+                        obj.insert(
+                            trimmed.to_string(),
+                            serde_json::Value::String("*".to_string()),
                         );
                     }
                 }
-            } else if let Some(ref pkgs) = packages
+            }
+
+            let pkg_json = serde_json::json!({
+                "name": clean_name,
+                "version": "0.1.0",
+                "private": true,
+                "scripts": {
+                    "dev": "next dev",
+                    "build": "next build",
+                    "start": "next start",
+                    "lint": "next lint"
+                },
+                "dependencies": deps,
+                "devDependencies": {
+                    "@types/node": "^22.0.0",
+                    "@types/react": "^19.0.0",
+                    "@types/react-dom": "^19.0.0",
+                    "postcss": "^8.4.0",
+                    "tailwindcss": "^4.0.0",
+                    "typescript": "^5.7.0"
+                }
+            });
+            fs::write(
+                target_dir.join("package.json"),
+                serde_json::to_string_pretty(&pkg_json).unwrap_or_default(),
+            )
+            .map_err(|e| format!("Failed to write package.json: {}", e))?;
+
+            let tsconfig = r#"{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+"#;
+            fs::write(target_dir.join("tsconfig.json"), tsconfig)
+                .map_err(|e| format!("Failed to write tsconfig.json: {}", e))?;
+
+            fs::write(
+                target_dir.join("next-env.d.ts"),
+                "/// <reference types=\"next\" />\n/// <reference types=\"next/image-types/global\" />\n",
+            )
+            .map_err(|e| format!("Failed to write next-env.d.ts: {}", e))?;
+
+            fs::write(
+                target_dir.join("next.config.ts"),
+                "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = {};\n\nexport default nextConfig;\n",
+            )
+            .map_err(|e| format!("Failed to write next.config.ts: {}", e))?;
+
+            fs::write(
+                target_dir.join("postcss.config.mjs"),
+                "export default {\n  plugins: {\n    \"@tailwindcss/postcss\": {},\n  },\n};\n",
+            )
+            .map_err(|e| format!("Failed to write postcss.config.mjs: {}", e))?;
+
+            fs::write(
+                app_dir.join("globals.css"),
+                "@import \"tailwindcss\";\n\n:root {\n  --background: #ffffff;\n  --foreground: #171717;\n}\n\nbody {\n  color: var(--foreground);\n  background: var(--background);\n  font-family: Arial, Helvetica, sans-serif;\n}\n",
+            )
+            .map_err(|e| format!("Failed to write app/globals.css: {}", e))?;
+
+            fs::write(
+                app_dir.join("layout.tsx"),
+                format!("import type {{ Metadata }} from \"next\";\nimport \"./globals.css\";\n\nexport const metadata: Metadata = {{\n  title: \"{}\",\n  description: \"Created by Layer\",\n}};\n\nexport default function RootLayout({{\n  children,\n}}: Readonly<{{\n  children: React.ReactNode;\n}}>) {{\n  return (\n    <html lang=\"en\">\n      <body>{{children}}</body>\n    </html>\n  );\n}}\n", clean_name),
+            )
+            .map_err(|e| format!("Failed to write app/layout.tsx: {}", e))?;
+
+            fs::write(
+                app_dir.join("page.tsx"),
+                format!("export default function Home() {{\n  return (\n    <main className=\"flex min-h-screen flex-col items-center justify-center p-24\">\n      <h1 className=\"text-4xl font-bold tracking-tight\">\n        Welcome to <span className=\"text-blue-600\">{}</span>\n      </h1>\n      <p className=\"mt-4 text-muted-foreground text-lg\">\n        Bootstrapped with Layer instant Next.js generator\n      </p>\n    </main>\n  );\n}}\n", clean_name),
+            )
+            .map_err(|e| format!("Failed to write app/page.tsx: {}", e))?;
+
+            warning_note = try_npm_install(&target_dir, packages.as_deref());
+        }
+        GeneratorPreset::ReactTs => {
+            fs::create_dir_all(&target_dir)
+                .map_err(|e| format!("Failed to create project dir: {}", e))?;
+            let src_dir = target_dir.join("src");
+            fs::create_dir_all(&src_dir).map_err(|e| format!("Failed to create src dir: {}", e))?;
+
+            let mut deps = serde_json::json!({
+                "react": "^18.3.1",
+                "react-dom": "^18.3.1"
+            });
+            if let Some(ref pkgs) = packages
+                && let Some(obj) = deps.as_object_mut()
+            {
+                for p in pkgs {
+                    let trimmed = p.trim();
+                    if !trimmed.is_empty() && !obj.contains_key(trimmed) {
+                        obj.insert(
+                            trimmed.to_string(),
+                            serde_json::Value::String("*".to_string()),
+                        );
+                    }
+                }
+            }
+
+            let pkg_json = serde_json::json!({
+                "name": clean_name,
+                "private": true,
+                "version": "0.0.0",
+                "type": "module",
+                "scripts": {
+                    "dev": "vite",
+                    "build": "tsc -b && vite build",
+                    "preview": "vite preview"
+                },
+                "dependencies": deps,
+                "devDependencies": {
+                    "@types/react": "^18.3.12",
+                    "@types/react-dom": "^18.3.1",
+                    "@vitejs/plugin-react": "^4.3.4",
+                    "typescript": "~5.6.2",
+                    "vite": "^6.0.0"
+                }
+            });
+            fs::write(
+                target_dir.join("package.json"),
+                serde_json::to_string_pretty(&pkg_json).unwrap_or_default(),
+            )
+            .map_err(|e| format!("Failed to write package.json: {}", e))?;
+
+            let tsconfig = r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true
+  },
+  "include": ["src"]
+}
+"#;
+            fs::write(target_dir.join("tsconfig.json"), tsconfig)
+                .map_err(|e| format!("Failed to write tsconfig.json: {}", e))?;
+
+            fs::write(
+                target_dir.join("vite.config.ts"),
+                "import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\n\nexport default defineConfig({\n  plugins: [react()],\n});\n",
+            )
+            .map_err(|e| format!("Failed to write vite.config.ts: {}", e))?;
+
+            fs::write(
+                target_dir.join("index.html"),
+                format!("<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>{}</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n    <script type=\"module\" src=\"/src/main.tsx\"></script>\n  </body>\n</html>\n", clean_name),
+            )
+            .map_err(|e| format!("Failed to write index.html: {}", e))?;
+
+            fs::write(
+                src_dir.join("index.css"),
+                ":root {\n  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;\n  line-height: 1.5;\n  font-weight: 400;\n}\nbody {\n  margin: 0;\n  display: flex;\n  min-width: 320px;\n  min-height: 100vh;\n}\n",
+            )
+            .map_err(|e| format!("Failed to write src/index.css: {}", e))?;
+
+            fs::write(
+                src_dir.join("App.css"),
+                ".container {\n  max-width: 1280px;\n  margin: 0 auto;\n  padding: 2rem;\n  text-align: center;\n}\n",
+            )
+            .map_err(|e| format!("Failed to write src/App.css: {}", e))?;
+
+            fs::write(
+                src_dir.join("App.tsx"),
+                format!("import {{ useState }} from 'react';\nimport './App.css';\n\nexport function App() {{\n  const [count, setCount] = useState(0);\n\n  return (\n    <div className=\"container\">\n      <h1>{}</h1>\n      <button onClick={{{{() => setCount((c) => c + 1)}}}}>\n        count is {{count}}\n      </button>\n    </div>\n  );\n}}\n\nexport default App;\n", clean_name),
+            )
+            .map_err(|e| format!("Failed to write src/App.tsx: {}", e))?;
+
+            fs::write(
+                src_dir.join("main.tsx"),
+                "import { StrictMode } from 'react';\nimport { createRoot } from 'react-dom/client';\nimport './index.css';\nimport App from './App.tsx';\n\ncreateRoot(document.getElementById('root')!).render(\n  <StrictMode>\n    <App />\n  </StrictMode>,\n);\n",
+            )
+            .map_err(|e| format!("Failed to write src/main.tsx: {}", e))?;
+
+            warning_note = try_npm_install(&target_dir, packages.as_deref());
+        }
+        GeneratorPreset::Custom(ref custom_name) => {
+            fs::create_dir_all(&target_dir)
+                .map_err(|e| format!("Failed to create project dir: {}", e))?;
+
+            let mut deps = serde_json::Map::new();
+            if let Some(ref pkgs) = packages {
+                for p in pkgs {
+                    let trimmed = p.trim();
+                    if !trimmed.is_empty() {
+                        deps.insert(
+                            trimmed.to_string(),
+                            serde_json::Value::String("*".to_string()),
+                        );
+                    }
+                }
+            }
+
+            let pkg_json = serde_json::json!({
+                "name": clean_name,
+                "version": "0.1.0",
+                "private": true,
+                "description": format!("{} project bootstrapped by Layer", custom_name),
+                "dependencies": deps,
+            });
+            fs::write(
+                target_dir.join("package.json"),
+                serde_json::to_string_pretty(&pkg_json).unwrap_or_default(),
+            )
+            .map_err(|e| format!("Failed to write package.json: {}", e))?;
+
+            let readme = format!(
+                "# {}\n\nBootstrapped with Layer (preset: `{}`).\n",
+                clean_name, custom_name
+            );
+            fs::write(target_dir.join("README.md"), readme)
+                .map_err(|e| format!("Failed to write README.md: {}", e))?;
+
+            warning_note = try_npm_install(&target_dir, packages.as_deref());
+        }
+        GeneratorPreset::RustBin | GeneratorPreset::RustLib => {
+            let flag = if preset == GeneratorPreset::RustBin {
+                "--bin"
+            } else {
+                "--lib"
+            };
+            let status = Command::new("cargo")
+                .args(["new", flag, clean_name])
+                .current_dir(dest_parent_dir)
+                .status()
+                .map_err(|e| format!("Failed to spawn cargo new: {}", e))?;
+
+            if !status.success() {
+                return Err(format!("cargo new exited with status {}", status));
+            }
+
+            if let Some(ref pkgs) = packages
                 && !pkgs.is_empty()
             {
-                let mut cargo_args = vec!["add".to_string()];
-                for pkg in pkgs {
-                    let p = pkg.trim();
-                    if !p.is_empty() {
-                        cargo_args.push(p.to_string());
-                    }
-                }
-                let cargo_start = std::time::Instant::now();
-                let cargo_timeout = std::time::Duration::from_secs(45);
-
-                if let Ok(mut cargo_child) = Command::new("cargo")
-                    .args(&cargo_args)
-                    .current_dir(&target_dir)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                {
-                    let mut cargo_done = false;
-                    while cargo_start.elapsed() < cargo_timeout {
-                        if let Ok(Some(_)) = cargo_child.try_wait() {
-                            cargo_done = true;
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    if !cargo_done {
-                        let _ = cargo_child.kill();
-                    }
-                }
+                warning_note = try_cargo_add(&target_dir, pkgs);
             }
         }
         GeneratorPreset::Python => {
@@ -666,6 +907,7 @@ pub fn bootstrap_project(
         created_files,
         files_synced,
         message,
+        environment_note: warning_note,
     })
 }
 
@@ -1089,6 +1331,14 @@ mod tests {
             Some(GeneratorPreset::ReactTs)
         );
         assert_eq!(
+            GeneratorPreset::parse("nextjs"),
+            Some(GeneratorPreset::NextJs)
+        );
+        assert_eq!(
+            GeneratorPreset::parse("next-ts"),
+            Some(GeneratorPreset::NextJs)
+        );
+        assert_eq!(
             GeneratorPreset::parse("rust-bin"),
             Some(GeneratorPreset::RustBin)
         );
@@ -1097,6 +1347,10 @@ mod tests {
             Some(GeneratorPreset::RustBin)
         );
         assert_eq!(GeneratorPreset::parse("unknown_preset"), None);
+        assert_eq!(
+            GeneratorPreset::parse_or_custom("svelte"),
+            GeneratorPreset::Custom("svelte".to_string())
+        );
     }
 
     #[test]

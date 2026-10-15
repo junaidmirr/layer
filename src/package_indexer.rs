@@ -903,6 +903,161 @@ impl PackageIndexer {
                     "Annotation for mapping HTTP POST requests onto specific handler methods.",
                 ),
             ]),
+            "next" | "next/link" | "next/image" | "next/navigation" => Some(vec![
+                decl(
+                    "next/link",
+                    "Link",
+                    "function",
+                    "export default function Link(props: LinkProps & React.AnchorHTMLAttributes<HTMLAnchorElement>): JSX.Element;",
+                    "Primary client-side navigation component in Next.js.",
+                ),
+                decl(
+                    "next/link",
+                    "LinkProps",
+                    "interface",
+                    "export interface LinkProps {\n  href: string | any;\n  as?: string | any;\n  replace?: boolean;\n  scroll?: boolean;\n  shallow?: boolean;\n  passHref?: boolean;\n  prefetch?: boolean;\n  locale?: string | false;\n}",
+                    "Props for Next.js Link component.",
+                ),
+                decl(
+                    "next/image",
+                    "Image",
+                    "function",
+                    "export default function Image(props: ImageProps): JSX.Element;",
+                    "Automatic image optimization component in Next.js.",
+                ),
+                decl(
+                    "next/image",
+                    "ImageProps",
+                    "interface",
+                    "export interface ImageProps extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, 'src' | 'width' | 'height'> {\n  src: string | any;\n  width?: number | `${number}`;\n  height?: number | `${number}`;\n  fill?: boolean;\n  alt: string;\n  priority?: boolean;\n  quality?: number | `${number}`;\n  placeholder?: 'blur' | 'empty';\n}",
+                    "Props for Next.js Image component.",
+                ),
+                decl(
+                    "next/navigation",
+                    "useRouter",
+                    "function",
+                    "export function useRouter(): AppRouterInstance;",
+                    "Hook to access the App Router navigation instance.",
+                ),
+                decl(
+                    "next/navigation",
+                    "usePathname",
+                    "function",
+                    "export function usePathname(): string;",
+                    "Returns the current URL pathname.",
+                ),
+                decl(
+                    "next/navigation",
+                    "useSearchParams",
+                    "function",
+                    "export function useSearchParams(): ReadonlyURLSearchParams;",
+                    "Returns the current URL search parameters.",
+                ),
+                decl(
+                    "next/navigation",
+                    "useParams",
+                    "function",
+                    "export function useParams<T = Record<string, string | string[]>>(): T;",
+                    "Returns dynamic route parameters from the current URL.",
+                ),
+                decl(
+                    "next/navigation",
+                    "redirect",
+                    "function",
+                    "export function redirect(url: string, type?: RedirectType): never;",
+                    "Programmatically redirects to another route.",
+                ),
+                decl(
+                    "next/navigation",
+                    "notFound",
+                    "function",
+                    "export function notFound(): never;",
+                    "Renders the Next.js 404 Not Found UI boundary.",
+                ),
+                decl(
+                    "next",
+                    "Metadata",
+                    "interface",
+                    "export interface Metadata {\n  title?: string | { default: string; template: string };\n  description?: string;\n  keywords?: string[] | string;\n  openGraph?: Record<string, any>;\n  twitter?: Record<string, any>;\n  icons?: any;\n}",
+                    "Static or dynamic page metadata configuration for App Router.",
+                ),
+                decl(
+                    "next",
+                    "NextConfig",
+                    "interface",
+                    "export interface NextConfig {\n  reactStrictMode?: boolean;\n  images?: { domains?: string[]; remotePatterns?: Array<any> };\n  experimental?: Record<string, any>;\n}",
+                    "Next.js configuration options interface (next.config.ts).",
+                ),
+            ]),
+            "tailwindcss" | "@tailwindcss/postcss" => Some(vec![
+                decl(
+                    "tailwindcss",
+                    "Config",
+                    "interface",
+                    "export interface Config {\n  content: string[];\n  theme?: { extend?: Record<string, any> };\n  plugins?: any[];\n  darkMode?: 'media' | 'class' | ['class', string];\n}",
+                    "Tailwind CSS configuration schema.",
+                ),
+                decl(
+                    "tailwindcss",
+                    "PluginCreator",
+                    "type",
+                    "export type PluginCreator = (api: { addUtilities: Function; addComponents: Function; addBase: Function; theme: Function }) => void;",
+                    "Signature for custom Tailwind CSS plugins.",
+                ),
+            ]),
+            "framer-motion" => Some(vec![
+                decl(
+                    "framer-motion",
+                    "motion",
+                    "const",
+                    "export const motion: { div: React.ForwardRefExoticComponent<any>; button: React.ForwardRefExoticComponent<any>; span: React.ForwardRefExoticComponent<any>; [key: string]: any };",
+                    "Component factory for creating animated HTML and SVG DOM elements.",
+                ),
+                decl(
+                    "framer-motion",
+                    "AnimatePresence",
+                    "component",
+                    "export const AnimatePresence: React.FC<{ children?: React.ReactNode; initial?: boolean; mode?: 'sync' | 'wait' | 'popLayout'; onExitComplete?: () => void }>;",
+                    "Renders components with enter and exit animations when removed from React tree.",
+                ),
+                decl(
+                    "framer-motion",
+                    "useAnimation",
+                    "function",
+                    "export function useAnimation(): AnimationControls;",
+                    "Hook to create manual animation controls.",
+                ),
+                decl(
+                    "framer-motion",
+                    "useMotionValue",
+                    "function",
+                    "export function useMotionValue<T>(initial: T): MotionValue<T>;",
+                    "Creates a reactive MotionValue that updates without re-rendering React.",
+                ),
+                decl(
+                    "framer-motion",
+                    "useTransform",
+                    "function",
+                    "export function useTransform<I, O>(value: MotionValue<I>, inputRange: I[], outputRange: O[]): MotionValue<O>;",
+                    "Creates a transformed MotionValue by mapping input range to output range.",
+                ),
+            ]),
+            "zustand" => Some(vec![
+                decl(
+                    "zustand",
+                    "create",
+                    "function",
+                    "export const create: <T>(initializer: (set: (partial: Partial<T> | ((state: T) => Partial<T>)) => void, get: () => T, store: any) => T) => () => T;",
+                    "Primary store creation function in Zustand.",
+                ),
+                decl(
+                    "zustand",
+                    "StateCreator",
+                    "type",
+                    "export type StateCreator<T, Mis = [], Mos = [], U = T> = (set: (partial: Partial<T> | ((state: T) => Partial<T>)) => void, get: () => T, api: any) => U;",
+                    "Type helper for creating reusable store slices in Zustand.",
+                ),
+            ]),
             _ => None,
         }
     }
@@ -1066,18 +1221,12 @@ impl PackageIndexer {
         None
     }
 
-    /// Fallback resolver for Rust crates in Cargo workspace
+    /// Fallback resolver for Rust crates in Cargo workspace or global ~/.cargo/registry/src
     fn resolve_rust_crate(
         workspace_root: &Path,
         crate_name: &str,
     ) -> Result<Vec<ExternalSymbolDecl>, String> {
-        // Look in cargo metadata or local path dependencies
-        let cargo_toml = workspace_root.join("Cargo.toml");
-        if !cargo_toml.exists() {
-            return Err(format!("Cargo.toml not found for crate '{}'", crate_name));
-        }
-
-        // Look for crate in workspace members or local crates
+        // 1. Look in workspace members or local crates
         let crates_dir = workspace_root.join("crates").join(crate_name);
         let src_lib = if crates_dir.exists() {
             crates_dir.join("src").join("lib.rs")
@@ -1101,11 +1250,75 @@ impl PackageIndexer {
                     source_dts: Some(src_lib.to_string_lossy().to_string()),
                 })
                 .collect();
-            return Ok(decls);
+            if !decls.is_empty() {
+                return Ok(decls);
+            }
+        }
+
+        // 2. Global Cargo cache lookup: ~/.cargo/registry/src/index.crates.io-*
+        let cargo_home = std::env::var("CARGO_HOME")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| {
+                std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".cargo"))
+            });
+
+        if let Some(cargo_dir) = cargo_home {
+            let registry_src = cargo_dir.join("registry").join("src");
+            if registry_src.is_dir()
+                && let Ok(registries) = fs::read_dir(&registry_src)
+            {
+                for reg in registries.flatten() {
+                    let reg_path = reg.path();
+                    if reg_path.is_dir()
+                        && let Ok(crate_entries) = fs::read_dir(&reg_path)
+                    {
+                        let mut matching_dirs: Vec<PathBuf> = Vec::new();
+                        for entry in crate_entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir()
+                                && let Some(folder_name) = path.file_name().and_then(|n| n.to_str())
+                                && let Some(rest) = folder_name.strip_prefix(crate_name)
+                                && rest.starts_with('-')
+                            {
+                                matching_dirs.push(path);
+                            }
+                        }
+                        matching_dirs.sort();
+                        if let Some(crate_dir) = matching_dirs.last() {
+                            let lib_rs = crate_dir.join("src").join("lib.rs");
+                            if lib_rs.exists()
+                                && let Ok(content) = fs::read_to_string(&lib_rs)
+                            {
+                                let (syms, _) =
+                                    AstScanner::extract_symbols_and_imports(&content, Some("rs"));
+                                let decls: Vec<ExternalSymbolDecl> = syms
+                                    .into_iter()
+                                    .filter(|s| s.signature.starts_with("pub "))
+                                    .map(|s| ExternalSymbolDecl {
+                                        package: crate_name.to_string(),
+                                        symbol_name: s.name,
+                                        kind: s.kind.to_string(),
+                                        signature: s.signature,
+                                        doc_comment: s.doc_comment,
+                                        source_dts: Some(lib_rs.to_string_lossy().to_string()),
+                                    })
+                                    .collect();
+                                if !decls.is_empty() {
+                                    return Ok(decls);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Err(format!(
-            "Crate '{}' source cannot be resolved locally.",
+            "Crate '{}' source cannot be resolved locally or in global cargo registry.",
             crate_name
         ))
     }

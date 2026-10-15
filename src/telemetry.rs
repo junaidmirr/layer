@@ -91,7 +91,7 @@ impl TelemetryTracker {
             | "prepare_task_context" => {
                 self.surgical_ast_reads += 1;
             }
-            "inspect_package_api" => {
+            "inspect_package_api" if tokens_saved > 0 => {
                 self.package_apis_inspected += 1;
             }
             "rename_symbol" => {

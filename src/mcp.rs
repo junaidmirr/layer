@@ -689,7 +689,13 @@ fn handle_rpc_method(
                 let elapsed_ms = duration.as_millis();
 
                 let (tokens_saved, turns_saved) = match tool_name {
-                    "inspect_package_api" => (2500, 1),
+                    "inspect_package_api" => {
+                        if content_text.contains("\"unindexed_offline\"") {
+                            (0, 0)
+                        } else {
+                            (2500, 1)
+                        }
+                    }
                     "init_harness" => (2000, 1),
                     "rename_symbol" => {
                         let k = if let Ok(parsed) =
@@ -806,21 +812,62 @@ pub fn find_project_root_for_path(path: &Path) -> Option<PathBuf> {
 }
 
 /// Canonicalizes a path from user/agent, resolves it against root, and ensures it is safely within root
-fn resolve_safe_path(root: &Path, raw_path: &str) -> Result<PathBuf, String> {
-    if raw_path.trim().is_empty() {
+pub fn resolve_safe_path(root: &Path, raw_path: &str) -> Result<PathBuf, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
         return Err("Error: Path cannot be empty.".to_string());
     }
-
-    let input_path = Path::new(raw_path);
-    let candidate = if input_path.is_absolute() {
-        input_path.to_path_buf()
-    } else {
-        root.join(input_path)
-    };
 
     let canonical_root = match root.canonicalize() {
         Ok(cr) => cr,
         Err(_) => root.to_path_buf(),
+    };
+
+    let effective_root_name = canonical_root
+        .file_name()
+        .or_else(|| root.file_name())
+        .and_then(|n| n.to_str());
+
+    let mut normalized_raw = trimmed.replace('\\', "/");
+    while let Some(stripped) = normalized_raw.strip_prefix("./") {
+        normalized_raw = stripped.to_string();
+    }
+
+    if let Some(root_name) = effective_root_name {
+        let nested_dir = canonical_root.join(root_name);
+        if !nested_dir.is_dir() {
+            if normalized_raw == root_name {
+                normalized_raw = ".".to_string();
+            } else if let Some(stripped) = normalized_raw.strip_prefix(&format!("{}/", root_name)) {
+                normalized_raw = stripped.to_string();
+            }
+        }
+    }
+
+    let input_path = Path::new(&normalized_raw);
+    let candidate = if input_path.is_absolute() {
+        if let Ok(rel) = input_path
+            .strip_prefix(&canonical_root)
+            .or_else(|_| input_path.strip_prefix(root))
+        {
+            if let Some(root_name) = effective_root_name {
+                if !canonical_root.join(root_name).is_dir() {
+                    if let Ok(stripped_rel) = rel.strip_prefix(root_name) {
+                        canonical_root.join(stripped_rel)
+                    } else {
+                        canonical_root.join(rel)
+                    }
+                } else {
+                    canonical_root.join(rel)
+                }
+            } else {
+                canonical_root.join(rel)
+            }
+        } else {
+            input_path.to_path_buf()
+        }
+    } else {
+        canonical_root.join(input_path)
     };
 
     let canonical_target = match candidate.canonicalize() {
@@ -890,7 +937,7 @@ fn maybe_switch_workspace_root(
     }
 }
 
-fn execute_tool(
+pub fn execute_tool(
     g: &mut VectorGraph,
     root: &mut PathBuf,
     tool_name: &str,
@@ -1286,7 +1333,14 @@ fn execute_tool(
 
             match pkg_indexer.inspect_package(root, pkg_name, sym_name, query) {
                 Ok(summary) => serde_json::to_string_pretty(&summary).unwrap_or_default(),
-                Err(e) => format!("Error: {}", e),
+                Err(e) => {
+                    let unindexed = serde_json::json!({
+                        "status": "unindexed_offline",
+                        "package": pkg_name,
+                        "advisory": format!("Package types for '{}' are unindexed or offline. Proceed directly using Layer mutation tools. Detail: {}", pkg_name, e)
+                    });
+                    serde_json::to_string_pretty(&unindexed).unwrap_or_default()
+                }
             }
         }
         "write_file" => {
@@ -1381,15 +1435,7 @@ fn execute_tool(
                 .and_then(|d| d.as_str())
                 .unwrap_or(".");
 
-            let preset = match crate::scaffold::GeneratorPreset::parse(preset_str) {
-                Some(p) => p,
-                None => {
-                    return format!(
-                        "Error: Unknown preset '{}'. Supported presets: 'react-ts', 'rust-bin', 'rust-lib'.",
-                        preset_str
-                    );
-                }
-            };
+            let preset = crate::scaffold::GeneratorPreset::parse_or_custom(preset_str);
 
             let dest_parent = match resolve_safe_path(root, dest_parent_str) {
                 Ok(p) => root.join(p),

@@ -2,10 +2,48 @@ use crate::graph::VectorGraph;
 use crate::package_indexer::PackageIndexer;
 use crate::scanner::AstScanner;
 use crate::verifier::{DiagnosticItem, VerificationReport, Verifier};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+static IMPORT_SPEC_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"['`"]([^'`"]+)['`"]"#).unwrap());
+
+pub fn is_import_diagnostic(d: &DiagnosticItem) -> bool {
+    if let Some("TS2307" | "E0583" | "E0432" | "E0433" | "MODULE_NOT_FOUND" | "PY_IMPORT_ERROR") =
+        d.code.as_deref()
+    {
+        return true;
+    }
+    let msg = d.message.to_lowercase();
+    let is_asset = [
+        ".css", ".scss", ".sass", ".less", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+        ".ico", ".json", ".woff", ".woff2", ".ttf", ".eot",
+    ]
+    .iter()
+    .any(|ext| msg.contains(ext));
+
+    is_asset
+        || msg.contains("cannot find module")
+        || msg.contains("file not found for module")
+        || msg.contains("unresolved import")
+        || msg.contains("failed to resolve: use of undeclared crate or module")
+        || msg.contains("unresolved relative")
+        || msg.contains("cannot find package")
+        || msg.contains("no such file or directory")
+}
+
+pub fn extract_import_specifier(msg: &str) -> Option<String> {
+    if let Some(caps) = IMPORT_SPEC_RE.captures(msg)
+        && let Some(mat) = caps.get(1)
+    {
+        return Some(mat.as_str().to_string());
+    }
+    None
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -74,6 +112,8 @@ pub struct MutationResult {
     pub circuit_breaker: Option<CircuitBreakerReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_downstream_updates: Vec<DownstreamUpdateItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_imports_to_create_next: Vec<String>,
     pub message: String,
 }
 
@@ -184,6 +224,7 @@ impl MutationManager {
                     verification: None,
                     circuit_breaker: None,
                     pending_downstream_updates: Vec::new(),
+                    missing_imports_to_create_next: Vec::new(),
                     message: format!(
                         "Successfully wrote {} bytes to '{}'.",
                         bytes_written,
@@ -215,33 +256,51 @@ impl MutationManager {
                 .iter()
                 .partition(|e| normalize(&e.file) == target_norm);
 
-        let has_local_fatal = local_errors.iter().any(|e| {
+        // Invariant 1: Universal Top-Down Coding Support
+        // Separate Tree-sitter AST syntax errors, import errors, and non-import errors.
+        let has_syntax_error = local_errors.iter().any(|e| {
             e.code.as_deref() == Some("SYNTAX_ERROR")
-                || e.code.as_deref() == Some("TS2307")
-                || e.code.as_deref() == Some("E0432")
-                || e.code.as_deref() == Some("E0433")
+                || e.message.contains("Syntax error detected")
+                || e.message.to_lowercase().contains("syntax error")
         });
 
-        let target_file_is_invalid = has_local_fatal || local_errors.len() >= 4;
+        let (import_errors, non_import_errors): (Vec<&DiagnosticItem>, Vec<&DiagnosticItem>) =
+            local_errors.iter().partition(|e| is_import_diagnostic(e));
+
+        let mut missing_imports_to_create_next: Vec<String> = Vec::new();
+        for err in &import_errors {
+            if let Some(spec) = extract_import_specifier(&err.message)
+                && !missing_imports_to_create_next.contains(&spec)
+            {
+                missing_imports_to_create_next.push(spec);
+            }
+        }
+
+        // Strict Rollback Rule: ONLY rollback when mutated file itself has SYNTAX_ERROR
+        // or >= 4 non-import type errors. Missing imports or assets NEVER trigger rollback!
+        let target_file_is_invalid = has_syntax_error || non_import_errors.len() >= 4;
 
         if target_file_is_invalid {
-            let reason = if has_local_fatal {
-                let first_fatal = local_errors
+            let reason = if has_syntax_error {
+                let first_syntax = local_errors
                     .iter()
                     .find(|e| {
                         e.code.as_deref() == Some("SYNTAX_ERROR")
-                            || e.code.as_deref() == Some("TS2307")
-                            || e.code.as_deref() == Some("E0432")
-                            || e.code.as_deref() == Some("E0433")
+                            || e.message.contains("Syntax error detected")
+                            || e.message.to_lowercase().contains("syntax error")
                     })
                     .map(|e| e.message.clone())
-                    .unwrap_or_else(|| "Fatal syntax/import error in target file".to_string());
-                format!("Fatal error in '{}': {}", rel_path.display(), first_fatal)
+                    .unwrap_or_else(|| "Syntax error in target file".to_string());
+                format!(
+                    "Fatal syntax error in '{}': {}",
+                    rel_path.display(),
+                    first_syntax
+                )
             } else {
                 format!(
-                    "Cascading compilation failure in '{}': {} new error(s).",
+                    "Cascading compilation failure in '{}': {} non-import error(s).",
                     rel_path.display(),
-                    local_errors.len()
+                    non_import_errors.len()
                 )
             };
 
@@ -261,10 +320,10 @@ impl MutationManager {
                 triggered: true,
                 rolled_back,
                 reason,
-                cascading_error_count: local_errors.len(),
+                cascading_error_count: non_import_errors.len(),
                 broken_downstream_files: vec![],
                 advisory: if rolled_back {
-                    "Auto-rolled back to previous state. Inspect error before reapplying changes."
+                    "Auto-rolled back to previous state. Inspect syntax/type error before reapplying changes."
                         .to_string()
                 } else {
                     "Fatal error in target file. Use `rollback_last_edit` to revert immediately."
@@ -282,8 +341,9 @@ impl MutationManager {
                     verification: Some(verif),
                     circuit_breaker,
                     pending_downstream_updates: Vec::new(),
+                    missing_imports_to_create_next: Vec::new(),
                     message: format!(
-                        "Circuit Breaker Triggered: Edit to '{}' was automatically reverted due to fatal errors.",
+                        "Circuit Breaker Triggered: Edit to '{}' was automatically reverted due to fatal syntax or cascading errors.",
                         rel_path.display()
                     ),
                 });
@@ -337,6 +397,7 @@ impl MutationManager {
                 verification: Some(verif),
                 circuit_breaker,
                 pending_downstream_updates,
+                missing_imports_to_create_next,
                 message: format!(
                     "Successfully wrote '{}'. Multi-file refactor in progress: {} downstream file(s) require follow-up updates.",
                     rel_path.display(),
@@ -344,6 +405,20 @@ impl MutationManager {
                 ),
             });
         }
+
+        let message = if missing_imports_to_create_next.is_empty() {
+            format!(
+                "Successfully wrote '{}' and verified with 0 circuit breaker faults.",
+                rel_path.display()
+            )
+        } else {
+            format!(
+                "Successfully wrote '{}'. Top-down implementation detected; {} missing sibling import(s) to create next: {}",
+                rel_path.display(),
+                missing_imports_to_create_next.len(),
+                missing_imports_to_create_next.join(", ")
+            )
+        };
 
         Ok(MutationResult {
             success: true,
@@ -354,10 +429,8 @@ impl MutationManager {
             verification: Some(verif),
             circuit_breaker: None,
             pending_downstream_updates: Vec::new(),
-            message: format!(
-                "Successfully wrote '{}' and verified with 0 circuit breaker faults.",
-                rel_path.display()
-            ),
+            missing_imports_to_create_next,
+            message,
         })
     }
 
