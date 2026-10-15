@@ -13,6 +13,8 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
 
     let mut line = String::new();
     let mut recent_queries: Vec<String> = Vec::new();
+    let mut pkg_indexer = crate::package_indexer::PackageIndexer::new();
+
     while reader.read_line(&mut line)? > 0 {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -32,6 +34,7 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
                 val.get("params"),
                 &mut writer,
                 &mut recent_queries,
+                &mut pkg_indexer,
             )?;
         }
 
@@ -41,6 +44,7 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_rpc_method(
     graph: &Arc<Mutex<VectorGraph>>,
     root: &mut PathBuf,
@@ -49,6 +53,7 @@ fn handle_rpc_method(
     params: Option<&serde_json::Value>,
     writer: &mut io::StdoutLock,
     recent_queries: &mut Vec<String>,
+    pkg_indexer: &mut crate::package_indexer::PackageIndexer,
 ) -> io::Result<()> {
     match method {
         "initialize" => {
@@ -107,7 +112,8 @@ fn handle_rpc_method(
                     },
                     "capabilities": {
                         "tools": {}
-                    }
+                    },
+                    "instructions": "CRITICAL WORKFLOW: Always prefer Layer MCP tools over generic native file/shell tools when working on this project.\n1. Scaffolding & Setup: Use `bootstrap_project` or `scaffold_module` to scaffold verified structures with 0 hallucinated files and instant graph indexing.\n2. External APIs: Always call `inspect_package_api` before importing or using any third-party library to get exact type definitions and avoid hallucinated functions.\n3. Writing & Editing: ALWAYS use `write_file` and `edit_file`. They include automatic pre-mutation snapshotting, sub-5ms AST pre-checking, and error circuit breaking.\n4. Verification: Run `verify_project` to check project health with compact diagnostics, lifecycle tracking (new vs persistent vs resolved), and ground-truth error context injection.\n5. Refactoring: If an interface edit causes downstream errors, do NOT rollback; inspect the `pending_downstream_updates` checklist and update downstream files sequentially."
                 }
             });
             send_json_line(writer, &resp)?;
@@ -358,21 +364,26 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "verify_project",
-                            "description": "Run native project verification (cargo check for Rust, tsc for TypeScript). Returns structured, compact diagnostics (file, line, code, message) and compares against previous verification to detect newly introduced errors, resolved errors, and persistent errors.",
+                            "description": "PREFERRED over terminal cargo check or tsc. Runs native compiler verification with structured compact diagnostics and error lifecycle tracking (new, persistent, resolved). Pass force_compiler: true to bypass AST pre-check short-circuiting.",
                             "inputSchema": {
                                 "type": "object",
-                                "properties": {}
+                                "properties": {
+                                    "force_compiler": {
+                                        "type": "boolean",
+                                        "description": "Optional: Force running full compiler subprocess (tsc/cargo) even if fast AST pre-check passes or fails (default: false)"
+                                    }
+                                }
                             }
                         },
                         {
                             "name": "bootstrap_project",
-                            "description": "Bootstrap a new project using standard non-interactive ecosystem CLI generators (Vite React-TS, Cargo binary/lib). Guarantees zero overwrites, non-interactive execution with timeout, auto-switches workspace root, and immediately indexes the project. Supported presets: 'react-ts', 'rust-bin', 'rust-lib'.",
+                            "description": "Bootstrap a new project using standard non-interactive ecosystem CLI generators (Vite React-TS, Cargo binary/lib, Python, Go, C++, Swift, Kotlin, C#, Java). Guarantees zero overwrites, non-interactive execution with timeout, auto-switches workspace root, and immediately indexes the project. Supported presets: 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "preset": {
                                         "type": "string",
-                                        "description": "Ecosystem preset: 'react-ts', 'rust-bin', 'rust-lib'"
+                                        "description": "Ecosystem preset: 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'"
                                     },
                                     "project_name": {
                                         "type": "string",
@@ -381,9 +392,162 @@ fn handle_rpc_method(
                                     "destination": {
                                         "type": "string",
                                         "description": "Optional destination parent directory (defaults to current workspace root)"
+                                    },
+                                    "packages": {
+                                        "type": "array",
+                                        "items": { "type": "string" },
+                                        "description": "Optional initial packages to install immediately using fast non-blocking flags (e.g. ['three', '@react-three/fiber', '@react-three/drei'])"
+                                    }
+                                }
+                            },
+                            "required": ["preset", "project_name"]
+                        },
+                        {
+                            "name": "inspect_package_api",
+                            "description": "CRITICAL: Call this BEFORE writing code that imports external packages (e.g. Three.js, React Three Fiber, Lucide, Tailwind, Axum). Extracts exact TypeScript declarations (.d.ts) or Rust signatures directly from node_modules or Cargo dependencies to eliminate API hallucinations.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "package_name": {
+                                        "type": "string",
+                                        "description": "Name of the dependency package (e.g., '@react-three/fiber', 'three', 'zod')"
+                                    },
+                                    "symbol_name": {
+                                        "type": "string",
+                                        "description": "Optional exact symbol name to extract declaration and doc comments for"
+                                    },
+                                    "query": {
+                                        "type": "string",
+                                        "description": "Optional search term to filter exported package symbols"
                                     }
                                 },
-                                "required": ["preset", "project_name"]
+                                "required": ["package_name"]
+                            }
+                        },
+                        {
+                            "name": "write_file",
+                            "description": "PREFERRED over native Write tool. Writes full file content with automatic pre-edit snapshotting, instant AST pre-check (<5ms), graph synchronization, and cascading circuit breaker. Supports verify_mode ('fast', 'full', 'none'). In multi-file refactoring, preserves valid interface edits and returns pending_downstream_updates checklist instead of rolling back.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Relative path to the file to create or overwrite"
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Full file content to write"
+                                    },
+                                    "verify_mode": {
+                                        "type": "string",
+                                        "enum": ["fast", "full", "none"],
+                                        "description": "Optional verification tier: 'fast' (<5ms in-memory AST syntax and local import check, zero subprocesses), 'full' (AST pre-check + compiler subprocess), 'none' (skip verification). Default is 'fast'."
+                                    },
+                                    "auto_verify": {
+                                        "type": "boolean",
+                                        "description": "Optional: (Deprecated alias) false maps to verify_mode='none', true maps to 'fast'"
+                                    },
+                                    "auto_rollback_on_cascade": {
+                                        "type": "boolean",
+                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: true)"
+                                    }
+                                },
+                                "required": ["path", "content"]
+                            }
+                        },
+                        {
+                            "name": "edit_file",
+                            "description": "PREFERRED over native Edit tool. Surgically replaces a target snippet of code. Features automatic snapshotting, sub-5ms AST pre-check, and rollback protection for broken syntax.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Relative path to the file to edit"
+                                    },
+                                    "target": {
+                                        "type": "string",
+                                        "description": "Exact text snippet to replace (must match uniquely)"
+                                    },
+                                    "replacement": {
+                                        "type": "string",
+                                        "description": "New replacement code"
+                                    },
+                                    "verify_mode": {
+                                        "type": "string",
+                                        "enum": ["fast", "full", "none"],
+                                        "description": "Optional verification tier: 'fast' (<5ms in-memory AST syntax and local import check, zero subprocesses), 'full' (AST pre-check + compiler subprocess), 'none' (skip verification). Default is 'fast'."
+                                    },
+                                    "auto_verify": {
+                                        "type": "boolean",
+                                        "description": "Optional: (Deprecated alias) false maps to verify_mode='none', true maps to 'fast'"
+                                    },
+                                    "auto_rollback_on_cascade": {
+                                        "type": "boolean",
+                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: true)"
+                                    }
+                                },
+                                "required": ["path", "target", "replacement"]
+                            }
+                        },
+                        {
+                            "name": "rollback_last_edit",
+                            "description": "Instantly reverts the most recent write or edit to its pre-mutation snapshot and synchronizes the workspace graph in 1 tool turn.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {}
+                            }
+                        },
+                        {
+                            "name": "scaffold_module",
+                            "description": "PREFERRED for creating new modules or feature architectures. Declaratively scaffolds multiple TypeScript/Rust files with imports, interface declarations, and stubbed functions on Turn 1 with zero subprocess overhead and instant graph indexing.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "module_name": {
+                                        "type": "string",
+                                        "description": "Logical module or feature name (e.g. 'physics', 'auth')"
+                                    },
+                                    "files": {
+                                        "type": "array",
+                                        "description": "List of files to scaffold with their imports, types, and functions",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "path": { "type": "string", "description": "Relative file path" },
+                                                "imports": { "type": "array", "items": { "type": "string" } },
+                                                "types": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "name": { "type": "string" },
+                                                            "kind": { "type": "string" },
+                                                            "definition": { "type": "string" }
+                                                        },
+                                                        "required": ["name", "kind", "definition"]
+                                                    }
+                                                },
+                                                "functions": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "name": { "type": "string" },
+                                                            "signature": { "type": "string" },
+                                                            "stub_body": { "type": "string" },
+                                                            "doc_comment": { "type": "string" }
+                                                        },
+                                                        "required": ["name", "signature"]
+                                                    }
+                                                },
+                                                "raw_content": { "type": "string" }
+                                            },
+                                            "required": ["path"]
+                                        }
+                                    }
+                                },
+                                "required": ["module_name", "files"]
                             }
                         }
                     ]
@@ -415,7 +579,7 @@ fn handle_rpc_method(
             }
             recent_queries.push(query_key);
 
-            let mut content_text = execute_tool(&mut g, root, tool_name, arguments);
+            let mut content_text = execute_tool(&mut g, root, tool_name, arguments, pkg_indexer);
             if is_duplicate
                 && !content_text.starts_with("Error:")
                 && let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&content_text)
@@ -592,6 +756,7 @@ fn execute_tool(
     root: &mut PathBuf,
     tool_name: &str,
     args: Option<&serde_json::Value>,
+    pkg_indexer: &mut crate::package_indexer::PackageIndexer,
 ) -> String {
     let empty_args = json!({});
     let args = args.unwrap_or(&empty_args);
@@ -620,6 +785,7 @@ fn execute_tool(
         eprintln!("[layer-mcp] Workspace switched to: {}", canonical.display());
         *root = canonical.clone();
         g.clear();
+        pkg_indexer.clear();
         g.sync_workspace(&canonical);
 
         let res = json!({
@@ -958,10 +1124,112 @@ fn execute_tool(
             serde_json::to_string_pretty(&packet).unwrap_or_default()
         }
         "verify_project" => {
-            let report =
-                crate::verifier::Verifier::verify_workspace(root, g.last_verification.as_deref());
+            let force_compiler = args
+                .get("force_compiler")
+                .and_then(|f| f.as_bool())
+                .unwrap_or(false);
+            let report = crate::verifier::Verifier::verify_workspace_with_options(
+                root,
+                g,
+                Some(pkg_indexer),
+                force_compiler,
+            );
             g.last_verification = Some(report.diagnostics.clone());
             serde_json::to_string_pretty(&report).unwrap_or_default()
+        }
+        "inspect_package_api" => {
+            let pkg_name = args
+                .get("package_name")
+                .and_then(|p| p.as_str())
+                .unwrap_or("");
+            let sym_name = args.get("symbol_name").and_then(|s| s.as_str());
+            let query = args.get("query").and_then(|q| q.as_str());
+
+            match pkg_indexer.inspect_package(root, pkg_name, sym_name, query) {
+                Ok(summary) => serde_json::to_string_pretty(&summary).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "write_file" => {
+            let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let content = args.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let verify_mode_str = args.get("verify_mode").and_then(|m| m.as_str());
+            let auto_verify = args.get("auto_verify").and_then(|v| v.as_bool());
+            let verify_mode = crate::mutation::VerifyMode::parse(verify_mode_str, auto_verify);
+            let auto_rollback = args
+                .get("auto_rollback_on_cascade")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(true);
+
+            let safe_rel = match resolve_safe_path(root, path_str) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+
+            match crate::mutation::MutationManager::write_file(
+                root,
+                &safe_rel,
+                content,
+                verify_mode,
+                auto_rollback,
+                g,
+                Some(pkg_indexer),
+            ) {
+                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "edit_file" => {
+            let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let target = args.get("target").and_then(|t| t.as_str()).unwrap_or("");
+            let replacement = args
+                .get("replacement")
+                .and_then(|r| r.as_str())
+                .unwrap_or("");
+            let verify_mode_str = args.get("verify_mode").and_then(|m| m.as_str());
+            let auto_verify = args.get("auto_verify").and_then(|v| v.as_bool());
+            let verify_mode = crate::mutation::VerifyMode::parse(verify_mode_str, auto_verify);
+            let auto_rollback = args
+                .get("auto_rollback_on_cascade")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(true);
+
+            let safe_rel = match resolve_safe_path(root, path_str) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+
+            match crate::mutation::MutationManager::edit_file(
+                root,
+                &safe_rel,
+                target,
+                replacement,
+                verify_mode,
+                auto_rollback,
+                g,
+                Some(pkg_indexer),
+            ) {
+                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "rollback_last_edit" => {
+            match crate::mutation::MutationManager::rollback_last_edit(root, g) {
+                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "scaffold_module" => {
+            let req: crate::scaffold::ScaffoldModuleRequest =
+                match serde_json::from_value(args.clone()) {
+                    Ok(r) => r,
+                    Err(e) => return format!("Error parsing scaffold_module arguments: {}", e),
+                };
+
+            match crate::scaffold::scaffold_module(root, req, g) {
+                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
         }
         "bootstrap_project" => {
             let preset_str = args.get("preset").and_then(|p| p.as_str()).unwrap_or("");
@@ -989,7 +1257,20 @@ fn execute_tool(
                 Err(e) => return format!("Error: Invalid destination: {}", e),
             };
 
-            match crate::scaffold::bootstrap_project(preset, project_name, &dest_parent, g) {
+            let packages: Option<Vec<String>> =
+                args.get("packages").and_then(|p| p.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                });
+
+            match crate::scaffold::bootstrap_project(
+                preset,
+                project_name,
+                &dest_parent,
+                packages,
+                g,
+            ) {
                 Ok(res) => {
                     let target_path = dest_parent.join(project_name.trim());
                     if let Ok(canon) = target_path.canonicalize() {
@@ -999,6 +1280,7 @@ fn execute_tool(
                         );
                         *root = canon.clone();
                         g.clear();
+                        pkg_indexer.clear();
                         g.sync_workspace(&canon);
                     }
                     serde_json::to_string_pretty(&res).unwrap_or_default()
@@ -1090,6 +1372,8 @@ mod tests {
         graph.sync_workspace(&current_root);
         assert!(graph.files.contains_key(&PathBuf::from("main.rs")));
 
+        let mut pkg_indexer = crate::package_indexer::PackageIndexer::new();
+
         // 1. Explicitly switch workspace to root_b
         let switch_args = json!({ "path": canon_b.to_str().unwrap() });
         let switch_res = execute_tool(
@@ -1097,6 +1381,7 @@ mod tests {
             &mut current_root,
             "set_workspace",
             Some(&switch_args),
+            &mut pkg_indexer,
         );
         assert!(switch_res.contains("\"success\": true"));
         assert_eq!(current_root, canon_b);
@@ -1112,6 +1397,7 @@ mod tests {
             &mut current_root,
             "get_skeleton",
             Some(&query_args),
+            &mut pkg_indexer,
         );
         assert_eq!(
             current_root, canon_a,

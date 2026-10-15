@@ -91,33 +91,33 @@ edition = "2024"
 
 #[test]
 fn test_newly_introduced_and_persisting_typescript_diagnostics() {
-    let initial_prev = vec![DiagnosticItem {
-        file: "src/physics/engine.ts".to_string(),
-        line: 12,
-        col: 5,
-        severity: "error".to_string(),
-        code: Some("TS2322".to_string()),
-        message: "Type 'string' is not assignable to type 'number'.".to_string(),
-    }];
+    let initial_prev = vec![DiagnosticItem::new(
+        "src/physics/engine.ts",
+        12,
+        5,
+        "error",
+        Some("TS2322".to_string()),
+        "Type 'string' is not assignable to type 'number'.",
+    )];
 
     // Agent attempts fix on engine.ts (fails to fix TS2322) and edits Canvas.tsx (introduces TS2304)
     let current_diags = vec![
-        DiagnosticItem {
-            file: "src/physics/engine.ts".to_string(),
-            line: 14, // line shifted
-            col: 5,
-            severity: "error".to_string(),
-            code: Some("TS2322".to_string()),
-            message: "Type 'string' is not assignable to type 'number'.".to_string(),
-        },
-        DiagnosticItem {
-            file: "src/components/Canvas.tsx".to_string(),
-            line: 50,
-            col: 9,
-            severity: "error".to_string(),
-            code: Some("TS2304".to_string()),
-            message: "Cannot find name 'WebGLRenderingContext'.".to_string(),
-        },
+        DiagnosticItem::new(
+            "src/physics/engine.ts",
+            14, // line shifted
+            5,
+            "error",
+            Some("TS2322".to_string()),
+            "Type 'string' is not assignable to type 'number'.",
+        ),
+        DiagnosticItem::new(
+            "src/components/Canvas.tsx",
+            50,
+            9,
+            "error",
+            Some("TS2304".to_string()),
+            "Cannot find name 'WebGLRenderingContext'.",
+        ),
     ];
 
     let comp = Verifier::compare_diagnostics(Some(&initial_prev), &current_diags);

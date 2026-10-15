@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-static IMPORT_PATH_REGEX: LazyLock<Regex> =
+pub static IMPORT_PATH_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"['"]([^'"]+)['"]"#).unwrap());
 
 fn default_path_aliases() -> HashMap<String, String> {
@@ -40,6 +40,8 @@ pub struct VectorGraph {
     pub last_verification: Option<Vec<crate::verifier::DiagnosticItem>>,
     /// Configured path aliases (e.g. "@/*" -> "src/*") from tsconfig.json or defaults
     pub path_aliases: HashMap<String, String>,
+    /// Last file mutation snapshot for circuit breaker and rollback
+    pub last_mutation_snapshot: Option<crate::mutation::MutationSnapshot>,
 }
 
 impl Default for VectorGraph {
@@ -73,6 +75,7 @@ impl VectorGraph {
             last_sync: None,
             last_verification: None,
             path_aliases: default_path_aliases(),
+            last_mutation_snapshot: None,
         }
     }
 
@@ -85,6 +88,23 @@ impl VectorGraph {
         self.last_sync = None;
         self.last_verification = None;
         self.path_aliases = default_path_aliases();
+        self.last_mutation_snapshot = None;
+    }
+
+    /// Returns files that import `target_path` (incoming edges in dependency graph)
+    pub fn get_downstream_dependents(&self, target_path: &Path) -> Vec<PathBuf> {
+        let mut dependents = Vec::new();
+        let target_buf = normalize_relative_path(target_path);
+        if let Some(&target_idx) = self.node_indices.get(&target_buf) {
+            for edge in self
+                .graph
+                .edges_directed(target_idx, petgraph::Direction::Incoming)
+            {
+                let source_idx = edge.source();
+                dependents.push(self.graph[source_idx].clone());
+            }
+        }
+        dependents
     }
 
     /// Insert or update a file node and re-index its chunks and graph connections
@@ -446,7 +466,50 @@ impl VectorGraph {
                     matched_target = resolve_rust_import_path(&source_path, &import, &known_files);
                 }
 
-                // 3. Connect edge if target matched
+                // 3. Try Python import resolution
+                if matched_target.is_none()
+                    && matches!(
+                        source_path.extension().and_then(|e| e.to_str()),
+                        Some("py" | "pyi" | "pyw")
+                    )
+                {
+                    matched_target =
+                        resolve_python_import_path(&source_path, &import, &known_files);
+                }
+
+                // 4. Try C/C++ include resolution
+                if matched_target.is_none()
+                    && matches!(
+                        source_path.extension().and_then(|e| e.to_str()),
+                        Some("c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hxx")
+                    )
+                {
+                    matched_target = resolve_cpp_include_path(&source_path, &import, &known_files);
+                }
+
+                // 5. Try Go package import resolution
+                if matched_target.is_none()
+                    && source_path.extension().and_then(|e| e.to_str()) == Some("go")
+                {
+                    matched_target = resolve_go_import_path(&source_path, &import, &known_files);
+                }
+
+                // 6. Try Java import resolution
+                if matched_target.is_none()
+                    && source_path.extension().and_then(|e| e.to_str()) == Some("java")
+                {
+                    matched_target = resolve_java_import_path(&source_path, &import, &known_files);
+                }
+
+                // 7. Try C# using resolution
+                if matched_target.is_none()
+                    && source_path.extension().and_then(|e| e.to_str()) == Some("cs")
+                {
+                    matched_target =
+                        resolve_csharp_import_path(&source_path, &import, &known_files);
+                }
+
+                // 8. Connect edge if target matched
                 if let Some(ref target) = matched_target {
                     if let Some(&target_idx) = self.node_indices.get(target)
                         && target_idx != source_idx
@@ -1617,15 +1680,25 @@ pub fn resolve_module_import_path(
     // 3. Try candidate extensions in order of specificity
     let base_str = base.to_string_lossy();
     let candidates = [
-        base.clone(), // direct match with extension (e.g. .css, .tsx, .json)
+        base.clone(), // direct match with extension (e.g. .css, .tsx, .json, .h, .py)
         PathBuf::from(format!("{}.ts", base_str)),
         PathBuf::from(format!("{}.tsx", base_str)),
         PathBuf::from(format!("{}.d.ts", base_str)),
         PathBuf::from(format!("{}.js", base_str)),
         PathBuf::from(format!("{}.jsx", base_str)),
+        PathBuf::from(format!("{}.py", base_str)),
+        PathBuf::from(format!("{}.go", base_str)),
+        PathBuf::from(format!("{}.hpp", base_str)),
+        PathBuf::from(format!("{}.h", base_str)),
+        PathBuf::from(format!("{}.cpp", base_str)),
+        PathBuf::from(format!("{}.swift", base_str)),
+        PathBuf::from(format!("{}.kt", base_str)),
+        PathBuf::from(format!("{}.cs", base_str)),
+        PathBuf::from(format!("{}.java", base_str)),
         base.join("index.ts"),
         base.join("index.tsx"),
         base.join("index.js"),
+        base.join("__init__.py"),
     ];
 
     for candidate in &candidates {
@@ -1681,6 +1754,271 @@ pub fn resolve_rust_import_path(
             let mod_cand = normalize_relative_path(&cur.join("mod.rs"));
             if known_files.contains(&mod_cand) {
                 return Some(mod_cand);
+            }
+        }
+    }
+
+    None
+}
+
+pub fn resolve_python_import_path(
+    source_path: &Path,
+    import: &str,
+    known_files: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let trimmed = import.trim();
+    // Parse "from <mod> import ..." or "import <mod>"
+    let mod_part = if let Some(after_from) = trimmed.strip_prefix("from ") {
+        after_from.split_whitespace().next()?
+    } else if let Some(after_import) = trimmed.strip_prefix("import ") {
+        after_import.split([',', ' ']).next()?
+    } else {
+        return None;
+    };
+
+    let parent = source_path.parent().unwrap_or(Path::new(""));
+    let (dots_count, path_sub) = {
+        let mut count = 0;
+        let mut chars = mod_part.chars().peekable();
+        while chars.peek() == Some(&'.') {
+            count += 1;
+            chars.next();
+        }
+        let remainder: String = chars.collect();
+        (count, remainder)
+    };
+
+    let target_base = if dots_count > 0 {
+        let mut cur = parent.to_path_buf();
+        for _ in 1..dots_count {
+            cur = cur.parent().unwrap_or(Path::new("")).to_path_buf();
+        }
+        if !path_sub.is_empty() {
+            let rel = path_sub.replace('.', "/");
+            cur.join(rel)
+        } else {
+            cur
+        }
+    } else {
+        let rel = mod_part.replace('.', "/");
+        PathBuf::from(rel)
+    };
+
+    let candidates = [
+        normalize_relative_path(&target_base.with_extension("py")),
+        normalize_relative_path(&target_base.join("__init__.py")),
+        normalize_relative_path(&parent.join(&target_base).with_extension("py")),
+        normalize_relative_path(&parent.join(&target_base).join("__init__.py")),
+        normalize_relative_path(&Path::new("src").join(&target_base).with_extension("py")),
+        normalize_relative_path(&Path::new("src").join(&target_base).join("__init__.py")),
+    ];
+
+    for cand in &candidates {
+        if known_files.contains(cand) {
+            return Some(cand.clone());
+        }
+    }
+
+    None
+}
+
+pub fn resolve_cpp_include_path(
+    source_path: &Path,
+    import: &str,
+    known_files: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let trimmed = import.trim();
+    if !trimmed.starts_with("#include") {
+        return None;
+    }
+    // Extract within "..." or <...>
+    let header = if let Some(start) = trimmed.find('"')
+        && let Some(end) = trimmed.rfind('"')
+        && start < end
+    {
+        &trimmed[start + 1..end]
+    } else if let Some(start) = trimmed.find('<')
+        && let Some(end) = trimmed.rfind('>')
+        && start < end
+    {
+        &trimmed[start + 1..end]
+    } else {
+        return None;
+    };
+
+    let parent = source_path.parent().unwrap_or(Path::new(""));
+    let header_path = Path::new(header);
+
+    let candidates = [
+        normalize_relative_path(&parent.join(header_path)),
+        normalize_relative_path(&Path::new("include").join(header_path)),
+        normalize_relative_path(&Path::new("src").join(header_path)),
+        normalize_relative_path(header_path),
+    ];
+
+    for cand in &candidates {
+        if known_files.contains(cand) {
+            return Some(cand.clone());
+        }
+    }
+
+    None
+}
+
+pub fn resolve_go_import_path(
+    source_path: &Path,
+    import: &str,
+    known_files: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let caps = IMPORT_PATH_REGEX.captures(import)?;
+    let spec = caps.get(1)?.as_str().trim();
+    if spec.is_empty() {
+        return None;
+    }
+
+    let parent = source_path.parent().unwrap_or(Path::new(""));
+    let target_dir = if spec.starts_with("./") || spec.starts_with("../") {
+        normalize_relative_path(&parent.join(spec))
+    } else {
+        let spec_path = Path::new(spec);
+        normalize_relative_path(spec_path)
+    };
+
+    let target_str = target_dir.to_string_lossy();
+    for file in known_files {
+        if file.extension().and_then(|e| e.to_str()) == Some("go") {
+            let file_parent = file.parent().unwrap_or(Path::new(""));
+            if file_parent == target_dir || file_parent.ends_with(&*target_str) {
+                return Some(file.clone());
+            }
+        }
+    }
+
+    None
+}
+
+pub fn resolve_java_import_path(
+    _source_path: &Path,
+    import: &str,
+    known_files: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let trimmed = import.trim();
+    if !trimmed.starts_with("import ") {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("import ")?.trim();
+    let rest = rest.strip_prefix("static ").unwrap_or(rest).trim();
+    let clean = rest.trim_end_matches(';').trim();
+    if clean.is_empty() {
+        return None;
+    }
+
+    if let Some(pkg_prefix) = clean.strip_suffix(".*") {
+        let pkg_rel = pkg_prefix.replace('.', "/");
+        for file in known_files {
+            if file.extension().and_then(|e| e.to_str()) == Some("java") {
+                let p_str = file.to_string_lossy();
+                if p_str.contains(&pkg_rel) {
+                    return Some(file.clone());
+                }
+            }
+        }
+    } else {
+        let rel = clean.replace('.', "/");
+        let class_path = PathBuf::from(format!("{}.java", rel));
+        let candidates = [
+            normalize_relative_path(&class_path),
+            normalize_relative_path(&Path::new("src/main/java").join(&class_path)),
+            normalize_relative_path(&Path::new("src/test/java").join(&class_path)),
+            normalize_relative_path(&Path::new("src").join(&class_path)),
+        ];
+        for cand in &candidates {
+            if known_files.contains(cand) {
+                return Some(cand.clone());
+            }
+        }
+
+        // Suffix match
+        let target_suffix = format!("{}.java", rel);
+        for file in known_files {
+            if file.extension().and_then(|e| e.to_str()) == Some("java") {
+                let f_str = file.to_string_lossy();
+                if f_str.ends_with(&target_suffix) {
+                    return Some(file.clone());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub fn resolve_csharp_import_path(
+    _source_path: &Path,
+    import: &str,
+    known_files: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let trimmed = import.trim();
+    if !trimmed.starts_with("using ") {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("using ")?.trim();
+    let rest = rest.strip_prefix("static ").unwrap_or(rest).trim();
+    let clean = rest.trim_end_matches(';').trim();
+    let ns = if let Some((_alias, target)) = clean.split_once('=') {
+        target.trim()
+    } else {
+        clean
+    };
+    if ns.is_empty() {
+        return None;
+    }
+
+    let parts: Vec<&str> = ns.split('.').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    // Try full path and sub-paths (skipping root namespace prefixes like ProjectName)
+    for start_idx in 0..parts.len() {
+        let sub_slice = &parts[start_idx..];
+        let sub_rel = sub_slice.join("/");
+        let ns_path = PathBuf::from(&sub_rel);
+        let candidates = [
+            normalize_relative_path(&ns_path.with_extension("cs")),
+            normalize_relative_path(&Path::new("src").join(&ns_path).with_extension("cs")),
+        ];
+        for cand in &candidates {
+            if known_files.contains(cand) {
+                return Some(cand.clone());
+            }
+        }
+
+        // Check if any known .cs file belongs to this folder or matches file stem
+        for file in known_files {
+            if file.extension().and_then(|e| e.to_str()) == Some("cs") {
+                let f_str = file.to_string_lossy();
+                if f_str == sub_rel
+                    || f_str.starts_with(&format!("{}/", sub_rel))
+                    || f_str.contains(&format!("/{}/", sub_rel))
+                {
+                    return Some(file.clone());
+                }
+            }
+        }
+    }
+
+    // Fallback: match last segment as class file
+    if let Some(&last_seg) = parts.last() {
+        for file in known_files {
+            if file.extension().and_then(|e| e.to_str()) == Some("cs") {
+                let f_str = file.to_string_lossy();
+                if f_str.ends_with(&format!("{}.cs", last_seg))
+                    || f_str.starts_with(&format!("{}/", last_seg))
+                    || f_str.contains(&format!("/{}/", last_seg))
+                {
+                    return Some(file.clone());
+                }
             }
         }
     }

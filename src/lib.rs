@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub mod context_compiler;
 pub mod context_engine;
 pub mod embedder;
@@ -5,6 +7,8 @@ pub mod graph;
 pub mod history;
 pub mod mcp;
 pub mod models;
+pub mod mutation;
+pub mod package_indexer;
 pub mod scaffold;
 pub mod scanner;
 pub mod verifier;

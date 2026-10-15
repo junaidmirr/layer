@@ -120,6 +120,160 @@ impl AstScanner {
         Some(usages)
     }
 
+    /// Fast lexical delimiter & balance check for languages without compiled Tree-sitter grammars (Swift, Kotlin, etc.)
+    pub fn check_lexical_syntax(content: &str) -> Result<(), (usize, usize, String)> {
+        let mut stack: Vec<(char, usize, usize)> = Vec::new();
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+        let mut in_string = false;
+        let mut string_quote = '"';
+        let mut escaped = false;
+
+        let mut line = 1;
+        let mut col = 0;
+
+        let chars: Vec<char> = content.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+
+        while i < len {
+            let ch = chars[i];
+            col += 1;
+
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+                in_line_comment = false;
+                escaped = false;
+                i += 1;
+                continue;
+            }
+
+            if in_line_comment {
+                i += 1;
+                continue;
+            }
+
+            if in_block_comment {
+                if ch == '*' && i + 1 < len && chars[i + 1] == '/' {
+                    in_block_comment = false;
+                    i += 2;
+                    col += 1;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == string_quote {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+
+            // Check comments start
+            if ch == '/' && i + 1 < len {
+                if chars[i + 1] == '/' {
+                    in_line_comment = true;
+                    i += 2;
+                    col += 1;
+                    continue;
+                } else if chars[i + 1] == '*' {
+                    in_block_comment = true;
+                    i += 2;
+                    col += 1;
+                    continue;
+                }
+            }
+
+            // Check strings start
+            if ch == '"' || ch == '\'' || ch == '`' {
+                in_string = true;
+                string_quote = ch;
+                escaped = false;
+                i += 1;
+                continue;
+            }
+
+            // Delimiter checking
+            match ch {
+                '(' | '[' | '{' => {
+                    stack.push((ch, line, col));
+                }
+                ')' => match stack.pop() {
+                    Some(('(', _, _)) => {}
+                    Some((open, o_line, o_col)) => {
+                        return Err((
+                            line,
+                            col,
+                            format!(
+                                "Mismatched delimiter ')', expected closing for '{}' from line {}, col {}",
+                                open, o_line, o_col
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err((line, col, "Unmatched closing delimiter ')'".to_string()));
+                    }
+                },
+                ']' => match stack.pop() {
+                    Some(('[', _, _)) => {}
+                    Some((open, o_line, o_col)) => {
+                        return Err((
+                            line,
+                            col,
+                            format!(
+                                "Mismatched delimiter ']', expected closing for '{}' from line {}, col {}",
+                                open, o_line, o_col
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err((line, col, "Unmatched closing delimiter ']'".to_string()));
+                    }
+                },
+                '}' => match stack.pop() {
+                    Some(('{', _, _)) => {}
+                    Some((open, o_line, o_col)) => {
+                        return Err((
+                            line,
+                            col,
+                            format!(
+                                "Mismatched delimiter '}}', expected closing for '{}' from line {}, col {}",
+                                open, o_line, o_col
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err((line, col, "Unmatched closing delimiter '}'".to_string()));
+                    }
+                },
+                _ => {}
+            }
+
+            i += 1;
+        }
+
+        if let Some((unclosed, u_line, u_col)) = stack.pop() {
+            return Err((
+                u_line,
+                u_col,
+                format!(
+                    "Unclosed delimiter '{}' starting at line {}, col {}",
+                    unclosed, u_line, u_col
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
     fn parse_tree(content: &str, lang: &Language) -> Option<tree_sitter::Tree> {
         let mut parser = Parser::new();
         parser.set_language(lang).ok()?;
