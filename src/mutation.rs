@@ -117,6 +117,15 @@ pub struct MutationResult {
     pub message: String,
 }
 
+impl MutationResult {
+    pub fn rolled_back(&self) -> bool {
+        self.circuit_breaker
+            .as_ref()
+            .map(|cb| cb.rolled_back)
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollbackResult {
     pub success: bool,
@@ -201,7 +210,17 @@ impl MutationManager {
         let verification = match verify_mode {
             VerifyMode::None => None,
             VerifyMode::Fast => {
-                let v = Verifier::verify_fast_ast_only(root, graph, pkg_indexer);
+                let mut allowed = HashSet::new();
+                allowed.insert(crate::graph::normalize_relative_path(rel_path));
+                for dep in graph.get_downstream_dependents(rel_path) {
+                    allowed.insert(crate::graph::normalize_relative_path(&dep));
+                }
+                let v = Verifier::verify_fast_ast_only_filtered(
+                    root,
+                    graph,
+                    pkg_indexer,
+                    Some(&allowed),
+                );
                 graph.last_verification = Some(v.diagnostics.clone());
                 Some(v)
             }

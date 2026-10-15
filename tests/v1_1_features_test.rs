@@ -4,6 +4,7 @@ use layer::package_indexer::PackageIndexer;
 use layer::telemetry::TelemetryTracker;
 use layer::verifier::Verifier;
 use std::fs;
+use std::path::Path;
 use tempfile::tempdir;
 
 #[test]
@@ -586,4 +587,177 @@ fn test_mcp_panic_boundary_isolation() {
         &mut pkg_indexer,
     );
     assert!(res.contains("Unknown tool"));
+}
+
+#[test]
+fn test_python_pep701_fstring_and_modern_syntax_write_never_false_positive_rollback() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    // Python 3.12 code using PEP 701 nested quotes inside f-strings and match-case
+    let python_code = r#"import sys
+
+def render_gui(config):
+    match config.get("mode"):
+        case "dark":
+            theme = "theme-dark"
+        case "light":
+            theme = "theme-light"
+        case _:
+            theme = "theme-default"
+
+    # PEP 701 nested quotes inside f-strings
+    status_msg = f"Status: {config['title']} (brightness: {config['brightness']:.2f})"
+    print(f"Rendered {theme}: {status_msg}")
+    return status_msg
+
+if __name__ == "__main__":
+    cfg = {"mode": "dark", "title": "Circuit Lab", "brightness": 0.85}
+    render_gui(cfg)
+"#;
+
+    let res = layer::mutation::MutationManager::write_file(
+        root,
+        Path::new("app.py"),
+        python_code,
+        layer::mutation::VerifyMode::Fast,
+        true, // auto_rollback_on_cascade
+        &mut graph,
+        Some(&mut pkg_indexer),
+    )
+    .expect("write_file should succeed for valid modern Python 3.12 syntax");
+
+    assert!(res.success, "Mutation must report success");
+    assert!(
+        !res.rolled_back(),
+        "Valid Python 3.12 code must NEVER be rolled back due to Tree-sitter false positives"
+    );
+    assert!(root.join("app.py").exists(), "app.py must remain on disk");
+    let on_disk = std::fs::read_to_string(root.join("app.py")).unwrap();
+    assert_eq!(on_disk, python_code);
+}
+
+#[test]
+fn test_no_subdirectory_hijacking_when_writing_to_parent_workspace() {
+    let dir = tempdir().unwrap();
+    let parent_dir = dir.path();
+
+    // Create an old Vite subfolder containing package.json
+    let old_vite_app = parent_dir.join("old_vite_app");
+    std::fs::create_dir_all(&old_vite_app).unwrap();
+    std::fs::write(
+        old_vite_app.join("package.json"),
+        r#"{"name": "old-vite-app", "version": "1.0.0"}"#,
+    )
+    .unwrap();
+
+    let mut graph = VectorGraph::new();
+    let mut ws_root = parent_dir.to_path_buf();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    // Call write_file tool via MCP execute_tool
+    let write_args = serde_json::json!({
+        "path": "app.py",
+        "content": "print('Hello from parent')\n"
+    });
+    let res = layer::mcp::execute_tool(
+        &mut graph,
+        &mut ws_root,
+        "write_file",
+        Some(&write_args),
+        &mut pkg_indexer,
+    );
+
+    assert!(
+        !res.starts_with("Error:"),
+        "write_file should not error: {}",
+        res
+    );
+    // ws_root must remain parent_dir, NOT hijacked into old_vite_app!
+    assert_eq!(
+        ws_root.canonicalize().unwrap(),
+        parent_dir.canonicalize().unwrap(),
+        "Workspace root must NOT be hijacked into old_vite_app!"
+    );
+    // app.py must be in parent_dir, NOT in old_vite_app!
+    assert!(
+        parent_dir.join("app.py").exists(),
+        "app.py must exist at parent root"
+    );
+    assert!(
+        !old_vite_app.join("app.py").exists(),
+        "app.py must NOT be created inside old_vite_app"
+    );
+}
+
+#[test]
+fn test_scaffolded_tsconfig_universal_compatibility() {
+    let dir = tempdir().unwrap();
+    let parent_dir = dir.path();
+    let mut graph = VectorGraph::new();
+
+    // 1. Next.js scaffold
+    let next_res = layer::scaffold::bootstrap_project(
+        layer::scaffold::GeneratorPreset::NextJs,
+        "next_demo",
+        parent_dir,
+        None,
+        &mut graph,
+    )
+    .expect("Next.js bootstrap must succeed");
+    assert!(next_res.success);
+
+    let next_tsconfig_path = parent_dir.join("next_demo/tsconfig.json");
+    let next_tsconfig: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&next_tsconfig_path).unwrap()).unwrap();
+    let next_opts = next_tsconfig.get("compilerOptions").unwrap();
+
+    assert_eq!(next_opts.get("target").unwrap(), "ES2020");
+    assert_eq!(next_opts.get("module").unwrap(), "ESNext");
+    assert_eq!(next_opts.get("moduleResolution").unwrap(), "bundler");
+    assert_eq!(next_opts.get("noEmit").unwrap(), true);
+    assert_eq!(next_opts.get("strict").unwrap(), true);
+    assert_eq!(next_opts.get("skipLibCheck").unwrap(), true);
+    assert_eq!(next_opts.get("isolatedModules").unwrap(), true);
+    assert_eq!(next_opts.get("esModuleInterop").unwrap(), true);
+    // Must NOT contain fragile/incompatible options
+    assert!(
+        next_opts.get("incremental").is_none(),
+        "tsconfig must not have incremental flag causing noEmit conflict"
+    );
+    assert!(
+        next_opts.get("plugins").is_none(),
+        "tsconfig must not have uninstalled plugins"
+    );
+    assert!(next_opts.get("noUncheckedSideEffectImports").is_none());
+    assert!(next_opts.get("erasableSyntaxOnly").is_none());
+
+    // 2. React-TS scaffold
+    let react_res = layer::scaffold::bootstrap_project(
+        layer::scaffold::GeneratorPreset::ReactTs,
+        "react_demo",
+        parent_dir,
+        None,
+        &mut graph,
+    )
+    .expect("React-TS bootstrap must succeed");
+    assert!(react_res.success);
+
+    let react_tsconfig_path = parent_dir.join("react_demo/tsconfig.json");
+    let react_tsconfig: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&react_tsconfig_path).unwrap()).unwrap();
+    let react_opts = react_tsconfig.get("compilerOptions").unwrap();
+
+    assert_eq!(react_opts.get("target").unwrap(), "ES2020");
+    assert_eq!(react_opts.get("module").unwrap(), "ESNext");
+    assert_eq!(react_opts.get("moduleResolution").unwrap(), "bundler");
+    assert_eq!(react_opts.get("jsx").unwrap(), "react-jsx");
+    assert_eq!(react_opts.get("noEmit").unwrap(), true);
+    assert_eq!(react_opts.get("strict").unwrap(), true);
+    assert_eq!(react_opts.get("skipLibCheck").unwrap(), true);
+    assert_eq!(react_opts.get("isolatedModules").unwrap(), true);
+    assert_eq!(react_opts.get("esModuleInterop").unwrap(), true);
+    assert!(react_opts.get("useDefineForClassFields").is_none());
 }

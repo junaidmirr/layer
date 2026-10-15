@@ -1099,11 +1099,11 @@ fn maybe_switch_workspace_root(
         None => return,
     };
     let p = Path::new(raw_p);
-    let abs_p = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        root.join(p)
-    };
+    // Only auto-switch workspace root if agent explicitly supplied an absolute path to a different project
+    if !p.is_absolute() {
+        return;
+    }
+    let abs_p = p.to_path_buf();
     if !abs_p.exists() {
         return;
     }
@@ -1202,7 +1202,7 @@ pub fn execute_tool(
         return serde_json::to_string_pretty(&res).unwrap_or_default();
     }
 
-    // Auto-detect project root if agent supplied a path pointing to a different project or nested directory
+    // Auto-detect project root if agent supplied an explicit absolute path pointing to a different project
     let candidate_path = args
         .get("path")
         .or_else(|| args.get("file"))
@@ -1210,32 +1210,6 @@ pub fn execute_tool(
         .and_then(|v| v.as_str());
 
     maybe_switch_workspace_root(root, g, candidate_path, Some(pkg_indexer));
-
-    // If current root has no recognized build config, but an immediate subdirectory does,
-    // automatically switch the active workspace root to that subdirectory!
-    if crate::verifier::ProjectType::detect(root) == crate::verifier::ProjectType::Unknown
-        && let Some(nested_root) = crate::verifier::detect_nested_project_root(root)
-    {
-        let canon = nested_root.canonicalize().unwrap_or(nested_root);
-        if canon.is_dir() && canon != *root {
-            let switch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                eprintln!(
-                    "[layer-mcp] Auto-detected nested project manifest at: {}. Switching active workspace.",
-                    canon.display()
-                );
-                *root = canon.clone();
-                g.clear();
-                pkg_indexer.clear();
-                g.sync_workspace(&canon);
-            }));
-            if let Err(err) = switch_res {
-                eprintln!(
-                    "[layer-mcp] Warning: Panic while switching to nested project root: {:?}",
-                    err
-                );
-            }
-        }
-    }
 
     // Synchronously sync workspace with disk to catch newly created/modified/deleted files
     g.sync_workspace(root);
@@ -1558,6 +1532,31 @@ pub fn execute_tool(
                 .get("force_compiler")
                 .and_then(|f| f.as_bool())
                 .unwrap_or(false);
+
+            if crate::verifier::ProjectType::detect(root) == crate::verifier::ProjectType::Unknown
+                && let Some(nested_root) = crate::verifier::detect_nested_project_root(root)
+            {
+                let canon = nested_root.canonicalize().unwrap_or(nested_root);
+                if canon.is_dir() && canon != *root {
+                    let switch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        eprintln!(
+                            "[layer-mcp] Auto-detected nested project manifest at: {}. Switching active workspace.",
+                            canon.display()
+                        );
+                        *root = canon.clone();
+                        g.clear();
+                        pkg_indexer.clear();
+                        g.sync_workspace(&canon);
+                    }));
+                    if let Err(err) = switch_res {
+                        eprintln!(
+                            "[layer-mcp] Warning: Panic while switching to nested project root: {:?}",
+                            err
+                        );
+                    }
+                }
+            }
+
             let report = crate::verifier::Verifier::verify_workspace_with_options(
                 root,
                 g,
@@ -1759,6 +1758,30 @@ pub fn execute_tool(
             }
         }
         "verify_impacted_tests" => {
+            if crate::verifier::ProjectType::detect(root) == crate::verifier::ProjectType::Unknown
+                && let Some(nested_root) = crate::verifier::detect_nested_project_root(root)
+            {
+                let canon = nested_root.canonicalize().unwrap_or(nested_root);
+                if canon.is_dir() && canon != *root {
+                    let switch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        eprintln!(
+                            "[layer-mcp] Auto-detected nested project manifest at: {}. Switching active workspace.",
+                            canon.display()
+                        );
+                        *root = canon.clone();
+                        g.clear();
+                        pkg_indexer.clear();
+                        g.sync_workspace(&canon);
+                    }));
+                    if let Err(err) = switch_res {
+                        eprintln!(
+                            "[layer-mcp] Warning: Panic while switching to nested project root: {:?}",
+                            err
+                        );
+                    }
+                }
+            }
+
             let changed_files: Option<Vec<String>> = args
                 .get("changed_files")
                 .and_then(|cf| cf.as_array())

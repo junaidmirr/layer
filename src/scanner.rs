@@ -311,6 +311,11 @@ impl AstScanner {
             }
 
             // Check comments start
+            if ch == '#' {
+                in_line_comment = true;
+                i += 1;
+                continue;
+            }
             if ch == '/' && i + 1 < len {
                 if chars[i + 1] == '/' {
                     in_line_comment = true;

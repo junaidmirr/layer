@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -106,6 +107,29 @@ pub enum ProjectType {
 
 impl ProjectType {
     pub fn detect(root: &Path) -> Self {
+        // Disambiguation: if the workspace has top-level Python files and no TS/Rust files,
+        // it must be identified as Python even if an unrelated subfolder or old config exists.
+        let mut top_level_py = false;
+        let mut top_level_ts = false;
+        let mut top_level_rs = false;
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
+                        "py" | "pyi" => top_level_py = true,
+                        "ts" | "tsx" | "js" | "jsx" => top_level_ts = true,
+                        "rs" => top_level_rs = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if top_level_py && !top_level_ts && !top_level_rs && !root.join("Cargo.toml").exists() {
+            return Self::Python;
+        }
+
         if root.join("Cargo.toml").exists() {
             Self::Rust
         } else if root.join("tsconfig.json").exists()
@@ -207,10 +231,53 @@ impl ProjectType {
     }
 }
 
+/// Checks whether the directory contains any top-level source code files
+fn has_top_level_source_files(root: &Path) -> bool {
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file()
+            && let Some(ext) = p.extension().and_then(|s| s.to_str())
+            && matches!(
+                ext,
+                "py" | "pyi"
+                    | "rs"
+                    | "ts"
+                    | "tsx"
+                    | "js"
+                    | "jsx"
+                    | "go"
+                    | "cpp"
+                    | "cc"
+                    | "cxx"
+                    | "c"
+                    | "h"
+                    | "hpp"
+                    | "swift"
+                    | "kt"
+                    | "kts"
+                    | "cs"
+                    | "java"
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Scans immediate child directories of `root` to see if one contains a recognized build manifest.
 /// Useful when a project was bootstrapped into a subfolder (e.g. `light_circuit_studio/` or `bulb-circuit-simulator/`).
+/// ONLY matches if root has NO top-level source files and there is a single unambiguous child project.
 pub fn detect_nested_project_root(root: &Path) -> Option<PathBuf> {
     if ProjectType::detect(root) != ProjectType::Unknown {
+        return None;
+    }
+
+    if has_top_level_source_files(root) {
         return None;
     }
 
@@ -243,13 +310,12 @@ pub fn detect_nested_project_root(root: &Path) -> Option<PathBuf> {
         }
     }
 
-    if candidates.is_empty() {
-        return None;
+    // Only auto-detect if there is a single unambiguous child project directory!
+    if candidates.len() == 1 {
+        Some(candidates.remove(0).0)
+    } else {
+        None
     }
-
-    // Sort by modification time descending (most recently created/modified project first)
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
-    Some(candidates.remove(0).0)
 }
 
 pub struct Verifier;
@@ -380,17 +446,34 @@ impl Verifier {
         }
     }
 
-    /// Fast-path in-memory AST syntax and local import resolution (<5ms).
-    /// Detects broken imports and syntax parse errors without spawning external compiler processes.
     pub fn instant_ast_precheck(
         root: &Path,
         files: &std::collections::HashMap<std::path::PathBuf, crate::models::FileNode>,
         path_aliases: &std::collections::HashMap<String, String>,
     ) -> Vec<DiagnosticItem> {
+        Self::instant_ast_precheck_filtered(root, files, path_aliases, None)
+    }
+
+    /// Fast-path in-memory AST syntax and local import resolution (<5ms).
+    /// Detects broken imports and syntax parse errors without spawning external compiler processes.
+    /// When allowed_files is provided, only those files are checked for syntax & local import issues.
+    pub fn instant_ast_precheck_filtered(
+        root: &Path,
+        files: &std::collections::HashMap<std::path::PathBuf, crate::models::FileNode>,
+        path_aliases: &std::collections::HashMap<String, String>,
+        allowed_files: Option<&HashSet<PathBuf>>,
+    ) -> Vec<DiagnosticItem> {
         let mut items = Vec::new();
         let known_files: HashSet<std::path::PathBuf> = files.keys().cloned().collect();
 
         for (rel_path, node) in files {
+            if let Some(allowed) = allowed_files {
+                let norm = crate::graph::normalize_relative_path(rel_path);
+                if !allowed.contains(&norm) && !allowed.contains(rel_path) {
+                    continue;
+                }
+            }
+
             let ext = node.extension.as_deref().unwrap_or("");
             if !matches!(
                 ext,
@@ -423,22 +506,65 @@ impl Verifier {
                 {
                     let root_node = tree.root_node();
                     if root_node.has_error() {
-                        let (line, col) = Self::find_ast_error_position(root_node);
-                        items.push(DiagnosticItem {
-                            file: rel_path.to_string_lossy().to_string(),
-                            line,
-                            col,
-                            severity: "error".to_string(),
-                            code: Some("SYNTAX_ERROR".to_string()),
-                            message: format!(
-                                "Syntax error detected in {} at line {}, column {}",
-                                rel_path.display(),
+                        let mut is_real_error = true;
+
+                        // Python false-positive filter:
+                        // tree-sitter-python flags modern PEP 701 f-strings (nested quotes inside f-strings)
+                        // or modern Python 3.10-3.12 syntax as (ERROR) CST nodes.
+                        if matches!(ext, "py" | "pyi") {
+                            let mut py_parsed_cleanly = false;
+                            let mut py_ran = false;
+
+                            if let Ok(mut child) = std::process::Command::new("python3")
+                                .args(["-c", "import ast, sys; ast.parse(sys.stdin.read())"])
+                                .stdin(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                            {
+                                if let Some(mut stdin) = child.stdin.take() {
+                                    let _ = stdin.write_all(node.content.as_bytes());
+                                }
+                                if let Ok(status) = child.wait() {
+                                    py_ran = true;
+                                    if status.success() {
+                                        py_parsed_cleanly = true;
+                                    }
+                                }
+                            }
+
+                            if py_ran {
+                                if py_parsed_cleanly {
+                                    is_real_error = false;
+                                }
+                            } else {
+                                // python3 binary not available; fall back to lexical delimiter check
+                                if crate::scanner::AstScanner::check_lexical_syntax(&node.content)
+                                    .is_ok()
+                                {
+                                    is_real_error = false;
+                                }
+                            }
+                        }
+
+                        if is_real_error {
+                            let (line, col) = Self::find_ast_error_position(root_node);
+                            items.push(DiagnosticItem {
+                                file: rel_path.to_string_lossy().to_string(),
                                 line,
-                                col
-                            ),
-                            occurrence_count: 1,
-                            ground_truth_context: None,
-                        });
+                                col,
+                                severity: "error".to_string(),
+                                code: Some("SYNTAX_ERROR".to_string()),
+                                message: format!(
+                                    "Syntax error detected in {} at line {}, column {}",
+                                    rel_path.display(),
+                                    line,
+                                    col
+                                ),
+                                occurrence_count: 1,
+                                ground_truth_context: None,
+                            });
+                        }
                     }
                 }
             } else if matches!(ext, "swift" | "kt" | "kts" | "cs" | "java")
@@ -822,6 +948,16 @@ impl Verifier {
         graph: &crate::graph::VectorGraph,
         pkg_indexer: Option<&mut crate::package_indexer::PackageIndexer>,
     ) -> VerificationReport {
+        Self::verify_fast_ast_only_filtered(root, graph, pkg_indexer, None)
+    }
+
+    /// Run fast in-memory AST syntax and import checks for a specific set of allowed files
+    pub fn verify_fast_ast_only_filtered(
+        root: &Path,
+        graph: &crate::graph::VectorGraph,
+        pkg_indexer: Option<&mut crate::package_indexer::PackageIndexer>,
+        allowed_files: Option<&HashSet<PathBuf>>,
+    ) -> VerificationReport {
         let mut target_root = root.to_path_buf();
         if ProjectType::detect(root) == ProjectType::Unknown
             && let Some(nested) = detect_nested_project_root(root)
@@ -829,8 +965,12 @@ impl Verifier {
             target_root = nested;
         }
 
-        let precheck_diags =
-            Self::instant_ast_precheck(&target_root, &graph.files, &graph.path_aliases);
+        let precheck_diags = Self::instant_ast_precheck_filtered(
+            &target_root,
+            &graph.files,
+            &graph.path_aliases,
+            allowed_files,
+        );
         let mut comparison =
             Self::compare_diagnostics(graph.last_verification.as_deref(), &precheck_diags);
         Self::enrich_persistent_diagnostics(
@@ -1301,13 +1441,6 @@ impl Verifier {
         let use_build_mode = root.join("tsconfig.app.json").exists();
 
         // Ensure .layer cache directory exists for fast incremental build cache
-        let layer_cache = root.join(".layer");
-        let _ = std::fs::create_dir_all(&layer_cache);
-        let ts_build_info = format!(
-            "--tsBuildInfoFile={}",
-            layer_cache.join("tsbuildinfo").display()
-        );
-
         let tsc_bin_path = if local_tsc.exists() {
             local_tsc
         } else {
@@ -1324,8 +1457,6 @@ impl Verifier {
         } else {
             vec![
                 "--noEmit".to_string(),
-                "--incremental".to_string(),
-                ts_build_info,
                 "--pretty".to_string(),
                 "false".to_string(),
             ]
