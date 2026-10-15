@@ -4,6 +4,7 @@ pub mod context_compiler;
 pub mod context_engine;
 pub mod embedder;
 pub mod graph;
+pub mod harness;
 pub mod history;
 pub mod mcp;
 pub mod models;

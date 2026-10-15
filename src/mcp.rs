@@ -603,6 +603,27 @@ fn handle_rpc_method(
                                     }
                                 }
                             }
+                        },
+                        {
+                            "name": "init_harness",
+                            "description": "Initialize agent steering directives (AGENTS.md, CLAUDE.md, .cursorrules) for AI coding agents (Codex, Claude Code, Cursor, OpenCode, Windsurf) so they automatically prioritize Layer MCP tools.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "harness": {
+                                        "type": "string",
+                                        "description": "Target harness name: 'codex', 'claude', 'cursor', 'opencode', 'windsurf', or 'all'. Defaults to 'all'."
+                                    },
+                                    "dest": {
+                                        "type": "string",
+                                        "description": "Optional directory path to initialize. Defaults to current workspace root."
+                                    },
+                                    "global": {
+                                        "type": "boolean",
+                                        "description": "Optionally verify and update global harness MCP configs (~/.codex/config.toml, etc.)."
+                                    }
+                                }
+                            }
                         }
                     ]
                 }
@@ -669,6 +690,7 @@ fn handle_rpc_method(
 
                 let (tokens_saved, turns_saved) = match tool_name {
                     "inspect_package_api" => (2500, 1),
+                    "init_harness" => (2000, 1),
                     "rename_symbol" => {
                         let k = if let Ok(parsed) =
                             serde_json::from_str::<serde_json::Value>(&content_text)
@@ -1466,6 +1488,33 @@ fn execute_tool(
                 "dashboard": dashboard,
                 "tool_breakdown": tracker.tool_breakdown,
             });
+            serde_json::to_string_pretty(&res).unwrap_or_default()
+        }
+        "init_harness" => {
+            let harness_str = args
+                .get("harness")
+                .and_then(|h| h.as_str())
+                .unwrap_or("all");
+            let harness_type: crate::harness::HarnessType = harness_str
+                .parse()
+                .unwrap_or(crate::harness::HarnessType::All);
+            let check_global = args
+                .get("global")
+                .and_then(|g| g.as_bool())
+                .unwrap_or(false);
+
+            let target_dir = if let Some(dest_str) = args.get("dest").and_then(|d| d.as_str()) {
+                let p = PathBuf::from(dest_str);
+                if p.is_absolute() { p } else { root.join(p) }
+            } else {
+                root.clone()
+            };
+
+            let res = crate::harness::HarnessManager::init_workspace(
+                &target_dir,
+                harness_type,
+                check_global,
+            );
             serde_json::to_string_pretty(&res).unwrap_or_default()
         }
         _ => format!("Unknown tool: {}", tool_name),

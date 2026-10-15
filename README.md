@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 [![Tree-sitter](https://img.shields.io/badge/Tree--sitter-Compiled%20Grammars-blueviolet.svg)](https://tree-sitter.github.io/tree-sitter/)
-[![MCP Compliant](https://img.shields.io/badge/MCP-22%20Tools%20%7C%2018%20CLI%20Commands-green.svg)](https://modelcontextprotocol.io)
+[![MCP Compliant](https://img.shields.io/badge/MCP-23%20Tools%20%7C%2019%20CLI%20Commands-green.svg)](https://modelcontextprotocol.io)
 
 **A high-performance Rust MCP (Model Context Protocol) server that sits between AI coding agents and codebases—performing surgical AST operations, dependency graph analysis, external package API inspection, and stateful error circuit-breaking in milliseconds.**
 
@@ -123,7 +123,7 @@ Layer provides universal intelligence across 9 major programming languages and e
 
 ---
 
-## Complete MCP Tool Inventory (22 Tools)
+## Complete MCP Tool Inventory (23 Tools)
 
 All tools are exposed over standard Model Context Protocol (MCP) JSON-RPC:
 
@@ -145,6 +145,7 @@ All tools are exposed over standard Model Context Protocol (MCP) JSON-RPC:
 - `scaffold_module`: Scaffold a multi-file architectural module in a single turn with typed interfaces, imports, and stubs.
 - `inspect_package_api`: Inspect exact third-party package declarations (`.d.ts`, Rust signatures, Python stubs) before importing to prevent hallucinations.
 - `scaffold_template`: Scaffold pre-defined starter templates (e.g. `rust-cli`).
+- `init_harness`: Prime AI coding agents (Codex, Claude Code, Cursor, OpenCode, Windsurf) by generating or appending steering instructions (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) so models automatically prioritize Layer MCP tools over native bash/edit commands.
 
 ### 3. Surgical File Mutation & Cross-File Refactoring
 - `write_file`: Write or create a file with automatic pre-mutation snapshotting, AST syntax validation, and circuit-breaker verification.
@@ -289,6 +290,14 @@ layer stats
 
 # Reset telemetry session counters
 layer stats --reset
+
+# Prime workspace with steering files (AGENTS.md, CLAUDE.md, .cursorrules)
+layer init
+layer init codex
+layer init claude
+
+# Output shell function wrappers (to enable 'codex --layer' or 'claude --layer')
+layer init --alias
 ```
 
 ---
@@ -298,7 +307,7 @@ layer stats --reset
 Layer maintains a rigorous, 100% passing test suite with zero warnings:
 
 ```bash
-# Run all 70 unit and integration tests across 7 test suites
+# Run all 76 unit and integration tests across 8 test suites
 cargo test
 
 # Run Clippy checks

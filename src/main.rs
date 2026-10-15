@@ -150,11 +150,116 @@ enum Commands {
         #[arg(long)]
         reset: bool,
     },
+    /// Initialize workspace steering instructions (AGENTS.md, CLAUDE.md, .cursorrules) for AI agent harnesses
+    Init {
+        /// Target harness (codex, claude, cursor, opencode, windsurf, all)
+        #[arg(default_value = "all")]
+        harness: String,
+        /// Verify and update global harness MCP configs (~/.codex/config.toml, ~/.claude/..., etc.)
+        #[arg(short, long)]
+        global: bool,
+        /// Print or install shell function wrappers (e.g., codex --layer)
+        #[arg(long)]
+        alias: bool,
+        /// Target directory to initialize (defaults to current directory)
+        #[arg(short, long)]
+        dest: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let root = cli.path.canonicalize().unwrap_or(cli.path);
+
+    if let Some(Commands::Init {
+        harness,
+        global,
+        alias,
+        dest,
+    }) = cli.command
+    {
+        if alias {
+            let aliases = layer::harness::HarnessManager::generate_shell_aliases();
+            if cli.json {
+                println!("{}", serde_json::json!({ "shell_aliases": aliases }));
+            } else {
+                println!(
+                    "{}",
+                    "Paste the following into your ~/.zshrc or ~/.bashrc to enable 'codex --layer' and 'claude --layer':\n"
+                        .cyan()
+                        .bold()
+                );
+                print!("{}", aliases);
+            }
+            return Ok(());
+        }
+
+        let target_dir = dest.unwrap_or_else(|| root.clone());
+        let harness_type: layer::harness::HarnessType = harness.parse().map_err(|e: String| e)?;
+        let report =
+            layer::harness::HarnessManager::init_workspace(&target_dir, harness_type, global);
+
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else if !cli.quiet {
+            println!(
+                "{}",
+                "════════════════════════════════════════════════════════════════".cyan()
+            );
+            println!(
+                "  {} {}",
+                "🚀 Layer Harness Initializer:".green().bold(),
+                harness_type.to_string().yellow().bold()
+            );
+            println!(
+                "{}",
+                "════════════════════════════════════════════════════════════════".cyan()
+            );
+            println!("  Target Directory:  {}", report.target_dir.white());
+            if !report.files_created.is_empty() {
+                for f in &report.files_created {
+                    println!(
+                        "  {} Created steering file: {}",
+                        "✓".green().bold(),
+                        f.green()
+                    );
+                }
+            }
+            if !report.files_updated.is_empty() {
+                for f in &report.files_updated {
+                    println!(
+                        "  {} Injected Layer directives into: {}",
+                        "✓".green().bold(),
+                        f.yellow()
+                    );
+                }
+            }
+            if !report.global_configs_updated.is_empty() {
+                for g in &report.global_configs_updated {
+                    println!(
+                        "  {} Configured global MCP in: {}",
+                        "✓".green().bold(),
+                        g.cyan()
+                    );
+                }
+            }
+            if report.files_created.is_empty() && report.files_updated.is_empty() {
+                println!(
+                    "  {} Directives already present and active in workspace.",
+                    "ℹ".blue().bold()
+                );
+            }
+            println!(
+                "\n  {} Agents running in this directory will now prioritize Layer MCP tools.",
+                "★".yellow().bold()
+            );
+            println!(
+                "{}",
+                "════════════════════════════════════════════════════════════════\n".cyan()
+            );
+        }
+        return Ok(());
+    }
 
     if let Some(Commands::Stats { workspace, reset }) = cli.command {
         let target_root = workspace.unwrap_or_else(|| root.clone());
@@ -692,6 +797,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Commands::Stats { .. }) => unreachable!(),
+        Some(Commands::Init { .. }) => unreachable!(),
         None | Some(Commands::Repl) => {
             run_repl(graph_arc)?;
         }
