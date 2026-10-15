@@ -238,7 +238,7 @@ fn handle_rpc_method(
                     "protocolVersion": "2024-11-05",
                     "serverInfo": {
                         "name": "layer-context-engine",
-                        "version": "0.1.0"
+                        "version": env!("CARGO_PKG_VERSION")
                     },
                     "capabilities": {
                         "tools": {}
