@@ -437,3 +437,153 @@ fn test_invariant_4_graceful_package_inspection_and_honest_telemetry() {
     assert_eq!(tracker.estimated_tokens_saved, initial_tokens + 2500); // Not credited!
     assert_eq!(tracker.total_tool_calls, initial_calls + 2);
 }
+
+#[test]
+fn test_bootstrap_project_nested_folder_and_transport_resilience() {
+    let dir = tempdir().unwrap();
+    let container_root = dir.path();
+    let mut graph = VectorGraph::new();
+    let mut root_buf = container_root.to_path_buf();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    // 1. Call bootstrap_project to create a nested subfolder 'light_circuit_studio'
+    let bootstrap_args = serde_json::json!({
+        "preset": "nextjs",
+        "project_name": "light_circuit_studio",
+        "destination": "."
+    });
+
+    let res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "bootstrap_project",
+        Some(&bootstrap_args),
+        &mut pkg_indexer,
+    );
+
+    // Verify response is valid JSON and contains created files
+    assert!(
+        !res_str.starts_with("Error:"),
+        "Bootstrap failed: {}",
+        res_str
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&res_str).unwrap();
+    assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["project_name"], "light_circuit_studio");
+
+    // Verify workspace root auto-switched to nested project
+    let nested_dir = container_root.join("light_circuit_studio");
+    assert_eq!(
+        root_buf.canonicalize().unwrap(),
+        nested_dir.canonicalize().unwrap(),
+        "Workspace root must auto-switch to bootstrapped nested directory"
+    );
+
+    // Verify project files exist
+    assert!(nested_dir.join("package.json").exists());
+    assert!(nested_dir.join("tsconfig.json").exists());
+    assert!(nested_dir.join("app/page.tsx").exists());
+
+    // 2. Subsequent write_file tool call on the active workspace succeeds without panic or error
+    let write_args = serde_json::json!({
+        "path": "app/BulbScene.tsx",
+        "content": "export function BulbScene() { return <div id=\"scene\">Bulb Active</div>; }",
+        "verify_mode": "fast"
+    });
+
+    let write_res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "write_file",
+        Some(&write_args),
+        &mut pkg_indexer,
+    );
+    assert!(
+        !write_res_str.starts_with("Error:"),
+        "Write failed: {}",
+        write_res_str
+    );
+    assert!(nested_dir.join("app/BulbScene.tsx").exists());
+}
+
+#[test]
+fn test_verify_project_auto_detects_nested_project_root() {
+    let dir = tempdir().unwrap();
+    let parent_dir = dir.path();
+
+    // 1. Parent dir is empty with no build manifest
+    assert_eq!(
+        layer::verifier::ProjectType::detect(parent_dir),
+        layer::verifier::ProjectType::Unknown
+    );
+
+    // 2. Create a nested project in a subfolder (e.g. 'bulb_circuit_sim')
+    let sub_proj = parent_dir.join("bulb_circuit_sim");
+    std::fs::create_dir_all(&sub_proj).unwrap();
+    std::fs::write(
+        sub_proj.join("package.json"),
+        r#"{"name": "bulb_circuit_sim", "version": "1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sub_proj.join("tsconfig.json"),
+        r#"{"compilerOptions": {"module": "esnext"}}"#,
+    )
+    .unwrap();
+
+    // 3. Direct verification of parent_dir MUST auto-detect the nested project root
+    let direct_report = layer::verifier::Verifier::verify_workspace(parent_dir, None);
+    assert_ne!(
+        direct_report.message, "No recognized build configuration found in workspace root.",
+        "Should never return missing config error when nested manifest exists"
+    );
+    assert_eq!(direct_report.project_type, "typescript");
+
+    // 4. MCP execute_tool('verify_project') from parent workspace auto-switches active root
+    let mut graph = VectorGraph::new();
+    let mut ws_root = parent_dir.to_path_buf();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    let verify_args = serde_json::json!({});
+    let mcp_res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut ws_root,
+        "verify_project",
+        Some(&verify_args),
+        &mut pkg_indexer,
+    );
+
+    assert!(!mcp_res_str.starts_with("Error:"));
+    let report_json: serde_json::Value = serde_json::from_str(&mcp_res_str).unwrap();
+    assert_eq!(report_json["project_type"], "typescript");
+    assert_ne!(
+        report_json["message"],
+        "No recognized build configuration found in workspace root."
+    );
+
+    // Active workspace root was updated to the nested project
+    assert_eq!(
+        ws_root.canonicalize().unwrap(),
+        sub_proj.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn test_mcp_panic_boundary_isolation() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+    let mut root_buf = root.to_path_buf();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    // Calling an operation with invalid / extreme data or unknown method does NOT panic the process
+    let unknown_args = serde_json::json!({ "invalid_field": 12345 });
+    let res = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "non_existent_tool_xyz",
+        Some(&unknown_args),
+        &mut pkg_indexer,
+    );
+    assert!(res.contains("Unknown tool"));
+}

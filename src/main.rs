@@ -324,7 +324,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Some(Commands::Mcp) => {
-            mcp::run_mcp_server(graph_arc, root)?;
+            if let Err(e) = mcp::run_mcp_server(graph_arc, root)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                eprintln!("[layer] MCP server closed: {}", e);
+            }
         }
         Some(Commands::Skeleton { file_path }) => {
             let g = graph_arc.lock().unwrap();

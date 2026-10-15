@@ -207,6 +207,51 @@ impl ProjectType {
     }
 }
 
+/// Scans immediate child directories of `root` to see if one contains a recognized build manifest.
+/// Useful when a project was bootstrapped into a subfolder (e.g. `light_circuit_studio/` or `bulb-circuit-simulator/`).
+pub fn detect_nested_project_root(root: &Path) -> Option<PathBuf> {
+    if ProjectType::detect(root) != ProjectType::Unknown {
+        return None;
+    }
+
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut candidates = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // Ignore hidden, VCS, cache, and build artifact folders
+        if name.starts_with('.')
+            || name == "node_modules"
+            || name == "target"
+            || name == "dist"
+            || name == "build"
+            || name == "bin"
+            || name == "obj"
+            || name == "__pycache__"
+        {
+            continue;
+        }
+
+        if ProjectType::detect(&path) != ProjectType::Unknown {
+            let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+            candidates.push((path, mtime));
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Sort by modification time descending (most recently created/modified project first)
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
+    Some(candidates.remove(0).0)
+}
+
 pub struct Verifier;
 
 impl Verifier {
@@ -726,18 +771,28 @@ impl Verifier {
         graph: Option<&crate::graph::VectorGraph>,
         previous_diagnostics: Option<&[DiagnosticItem]>,
     ) -> VerificationReport {
-        let project_type = ProjectType::detect(root);
+        let mut target_root = root.to_path_buf();
+        let mut project_type = ProjectType::detect(root);
+
+        if project_type == ProjectType::Unknown
+            && let Some(nested) = detect_nested_project_root(root)
+        {
+            target_root = nested;
+            project_type = ProjectType::detect(&target_root);
+        }
 
         match project_type {
-            ProjectType::Rust => Self::verify_rust(root, previous_diagnostics),
-            ProjectType::TypeScript => Self::verify_typescript(root, graph, previous_diagnostics),
-            ProjectType::Python => Self::verify_python(root, graph, previous_diagnostics),
-            ProjectType::Go => Self::verify_go(root, graph, previous_diagnostics),
-            ProjectType::Cpp => Self::verify_cpp(root, graph, previous_diagnostics),
-            ProjectType::Swift => Self::verify_swift(root, graph, previous_diagnostics),
-            ProjectType::Kotlin => Self::verify_kotlin(root, graph, previous_diagnostics),
-            ProjectType::CSharp => Self::verify_csharp(root, graph, previous_diagnostics),
-            ProjectType::Java => Self::verify_java(root, graph, previous_diagnostics),
+            ProjectType::Rust => Self::verify_rust(&target_root, previous_diagnostics),
+            ProjectType::TypeScript => {
+                Self::verify_typescript(&target_root, graph, previous_diagnostics)
+            }
+            ProjectType::Python => Self::verify_python(&target_root, graph, previous_diagnostics),
+            ProjectType::Go => Self::verify_go(&target_root, graph, previous_diagnostics),
+            ProjectType::Cpp => Self::verify_cpp(&target_root, graph, previous_diagnostics),
+            ProjectType::Swift => Self::verify_swift(&target_root, graph, previous_diagnostics),
+            ProjectType::Kotlin => Self::verify_kotlin(&target_root, graph, previous_diagnostics),
+            ProjectType::CSharp => Self::verify_csharp(&target_root, graph, previous_diagnostics),
+            ProjectType::Java => Self::verify_java(&target_root, graph, previous_diagnostics),
             ProjectType::Unknown => VerificationReport {
                 success: false,
                 project_type: "unknown".to_string(),
@@ -767,14 +822,22 @@ impl Verifier {
         graph: &crate::graph::VectorGraph,
         pkg_indexer: Option<&mut crate::package_indexer::PackageIndexer>,
     ) -> VerificationReport {
-        let precheck_diags = Self::instant_ast_precheck(root, &graph.files, &graph.path_aliases);
+        let mut target_root = root.to_path_buf();
+        if ProjectType::detect(root) == ProjectType::Unknown
+            && let Some(nested) = detect_nested_project_root(root)
+        {
+            target_root = nested;
+        }
+
+        let precheck_diags =
+            Self::instant_ast_precheck(&target_root, &graph.files, &graph.path_aliases);
         let mut comparison =
             Self::compare_diagnostics(graph.last_verification.as_deref(), &precheck_diags);
         Self::enrich_persistent_diagnostics(
             &mut comparison.persistent_errors,
             graph,
             pkg_indexer,
-            root,
+            &target_root,
         );
 
         let error_count = precheck_diags.len();
@@ -791,7 +854,7 @@ impl Verifier {
 
         VerificationReport {
             success,
-            project_type: ProjectType::detect(root).as_str().to_string(),
+            project_type: ProjectType::detect(&target_root).as_str().to_string(),
             error_count,
             warning_count: 0,
             diagnostics: precheck_diags,
@@ -811,8 +874,16 @@ impl Verifier {
         mut pkg_indexer: Option<&mut crate::package_indexer::PackageIndexer>,
         force_compiler: bool,
     ) -> VerificationReport {
+        let mut target_root = root.to_path_buf();
+        if ProjectType::detect(root) == ProjectType::Unknown
+            && let Some(nested) = detect_nested_project_root(root)
+        {
+            target_root = nested;
+        }
+
         // Fast-Path: In-memory AST precheck (<5ms)
-        let precheck_diags = Self::instant_ast_precheck(root, &graph.files, &graph.path_aliases);
+        let precheck_diags =
+            Self::instant_ast_precheck(&target_root, &graph.files, &graph.path_aliases);
         if !precheck_diags.is_empty() && !force_compiler {
             let mut comparison =
                 Self::compare_diagnostics(graph.last_verification.as_deref(), &precheck_diags);
@@ -820,13 +891,13 @@ impl Verifier {
                 &mut comparison.persistent_errors,
                 graph,
                 pkg_indexer.as_deref_mut(),
-                root,
+                &target_root,
             );
 
             let error_count = precheck_diags.len();
             return VerificationReport {
                 success: false,
-                project_type: ProjectType::detect(root).as_str().to_string(),
+                project_type: ProjectType::detect(&target_root).as_str().to_string(),
                 error_count,
                 warning_count: 0,
                 diagnostics: precheck_diags,
@@ -844,7 +915,7 @@ impl Verifier {
 
         // Run native verification
         let mut report = Self::verify_workspace_with_graph(
-            root,
+            &target_root,
             Some(graph),
             graph.last_verification.as_deref(),
         );
@@ -855,7 +926,7 @@ impl Verifier {
                 &mut comp.persistent_errors,
                 graph,
                 pkg_indexer,
-                root,
+                &target_root,
             );
         }
 
@@ -932,16 +1003,23 @@ impl Verifier {
         let mut executed_real_runner = false;
         let mut passed = true;
 
-        let proj_type = ProjectType::detect(root);
+        let mut target_root = root.to_path_buf();
+        let mut proj_type = ProjectType::detect(root);
+        if proj_type == ProjectType::Unknown
+            && let Some(nested) = detect_nested_project_root(root)
+        {
+            target_root = nested;
+            proj_type = ProjectType::detect(&target_root);
+        }
 
         // Try native test runner if present
         match proj_type {
             ProjectType::TypeScript => {
-                let vitest = root.join("node_modules/.bin/vitest");
-                let jest = root.join("node_modules/.bin/jest");
+                let vitest = target_root.join("node_modules/.bin/vitest");
+                let jest = target_root.join("node_modules/.bin/jest");
                 if vitest.exists() {
                     let mut cmd = Command::new(&vitest);
-                    cmd.arg("run").current_dir(root);
+                    cmd.arg("run").current_dir(&target_root);
                     for p in &impacted_paths {
                         cmd.arg(p);
                     }
@@ -951,7 +1029,7 @@ impl Verifier {
                     }
                 } else if jest.exists() {
                     let mut cmd = Command::new(&jest);
-                    cmd.current_dir(root);
+                    cmd.current_dir(&target_root);
                     for p in &impacted_paths {
                         cmd.arg(p);
                     }
@@ -972,7 +1050,7 @@ impl Verifier {
                 }
                 if !rust_test_names.is_empty() {
                     let mut cmd = Command::new("cargo");
-                    cmd.arg("test").current_dir(root);
+                    cmd.arg("test").current_dir(&target_root);
                     for name in &rust_test_names {
                         cmd.args(["--test", name]);
                     }
@@ -983,7 +1061,7 @@ impl Verifier {
                 }
             }
             ProjectType::Python => {
-                let pytest = root.join(".venv/bin/pytest");
+                let pytest = target_root.join(".venv/bin/pytest");
                 let runner = if pytest.exists() {
                     Some(pytest)
                 } else if Command::new("pytest").arg("--version").output().is_ok() {
@@ -994,7 +1072,7 @@ impl Verifier {
 
                 if let Some(bin) = runner {
                     let mut cmd = Command::new(bin);
-                    cmd.current_dir(root);
+                    cmd.current_dir(&target_root);
                     for p in &impacted_paths {
                         cmd.arg(p);
                     }
@@ -1013,7 +1091,7 @@ impl Verifier {
                 }
                 if !pkgs.is_empty() {
                     let mut cmd = Command::new("go");
-                    cmd.arg("test").current_dir(root);
+                    cmd.arg("test").current_dir(&target_root);
                     for pkg in &pkgs {
                         cmd.arg(format!("./{}", pkg));
                     }
@@ -1028,7 +1106,8 @@ impl Verifier {
 
         // Fast In-Memory AST / Import Precheck Fallback for impacted test files
         if !executed_real_runner {
-            let all_diags = Self::instant_ast_precheck(root, &graph.files, &graph.path_aliases);
+            let all_diags =
+                Self::instant_ast_precheck(&target_root, &graph.files, &graph.path_aliases);
             for d in all_diags {
                 let d_path = PathBuf::from(&d.file);
                 if impacted_paths.contains(&d_path) {

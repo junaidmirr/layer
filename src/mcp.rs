@@ -15,30 +15,51 @@ pub fn run_mcp_server(graph: Arc<Mutex<VectorGraph>>, mut root: PathBuf) -> io::
     let mut recent_queries: Vec<String> = Vec::new();
     let mut pkg_indexer = crate::package_indexer::PackageIndexer::new();
 
-    while reader.read_line(&mut line)? > 0 {
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF reached: client disconnected cleanly
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                eprintln!("[layer-mcp] Stdin read error: {}", e);
+                break;
+            }
+        }
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            line.clear();
             continue;
         }
 
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
-            && let Some(method) = val.get("method").and_then(|m| m.as_str())
-        {
-            let id = val.get("id").cloned();
-            handle_rpc_method(
-                &graph,
-                &mut root,
-                method,
-                id,
-                val.get("params"),
-                &mut writer,
-                &mut recent_queries,
-                &mut pkg_indexer,
-            )?;
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(val) => {
+                if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
+                    let id = val.get("id").cloned();
+                    if let Err(e) = handle_rpc_method(
+                        &graph,
+                        &mut root,
+                        method,
+                        id,
+                        val.get("params"),
+                        &mut writer,
+                        &mut recent_queries,
+                        &mut pkg_indexer,
+                    ) {
+                        eprintln!("[layer-mcp] RPC method error: {}", e);
+                        if e.kind() == io::ErrorKind::BrokenPipe {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "[layer-mcp] Warning: Received invalid JSON line: {} ({})",
+                    trimmed, err
+                );
+            }
         }
-
-        line.clear();
     }
 
     Ok(())
@@ -654,7 +675,39 @@ fn handle_rpc_method(
             }
             recent_queries.push(query_key);
 
-            let mut content_text = execute_tool(&mut g, root, tool_name, arguments, pkg_indexer);
+            let tool_name_owned = tool_name.to_string();
+            let args_cloned = arguments.cloned();
+
+            let exec_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_tool(
+                    &mut g,
+                    root,
+                    &tool_name_owned,
+                    args_cloned.as_ref(),
+                    pkg_indexer,
+                )
+            }));
+
+            let mut content_text = match exec_res {
+                Ok(res) => res,
+                Err(err) => {
+                    let panic_str = if let Some(s) = err.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = err.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic in tool execution".to_string()
+                    };
+                    eprintln!(
+                        "[layer-mcp] FATAL: Caught panic in tool '{}': {}",
+                        tool_name_owned, panic_str
+                    );
+                    format!(
+                        "Error: Internal panic in tool '{}': {}. Workspace preserved.",
+                        tool_name_owned, panic_str
+                    )
+                }
+            };
             if is_duplicate
                 && !content_text.starts_with("Error:")
                 && let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&content_text)
@@ -767,6 +820,17 @@ fn handle_rpc_method(
             });
             send_json_line(writer, &resp)?;
         }
+        "shutdown" => {
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": null
+            });
+            send_json_line(writer, &resp)?;
+        }
+        "exit" => {
+            std::process::exit(0);
+        }
         _ => {
             if let Some(id_val) = id {
                 let err = json!({
@@ -795,11 +859,18 @@ pub fn find_project_root_for_path(path: &Path) -> Option<PathBuf> {
     };
 
     while current.parent().is_some() {
-        if current.join(".git").exists()
-            || current.join("Cargo.toml").exists()
+        if current.join("Cargo.toml").exists()
             || current.join("package.json").exists()
+            || current.join("tsconfig.json").exists()
             || current.join("pyproject.toml").exists()
+            || current.join("requirements.txt").exists()
             || current.join("go.mod").exists()
+            || current.join("CMakeLists.txt").exists()
+            || current.join("Package.swift").exists()
+            || current.join("pom.xml").exists()
+            || current.join("build.gradle.kts").exists()
+            || current.join("build.gradle").exists()
+            || current.join(".git").exists()
         {
             return Some(current);
         }
@@ -908,32 +979,50 @@ fn maybe_switch_workspace_root(
     root: &mut PathBuf,
     g: &mut VectorGraph,
     candidate_path: Option<&str>,
+    mut pkg_indexer: Option<&mut crate::package_indexer::PackageIndexer>,
 ) {
     let raw_p = match candidate_path {
         Some(p) => p,
         None => return,
     };
     let p = Path::new(raw_p);
-    if !p.is_absolute() || !p.exists() {
+    let abs_p = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    };
+    if !abs_p.exists() {
         return;
     }
-    let canon_target = match p.canonicalize() {
+    let canon_target = match abs_p.canonicalize() {
         Ok(c) => c,
         Err(_) => return,
     };
-    if canon_target.starts_with(&*root) {
+    if canon_target == *root {
         return;
     }
-    if let Some(new_proj_root) = find_project_root_for_path(&canon_target)
-        && new_proj_root != *root
-    {
-        eprintln!(
-            "[layer-mcp] Auto-switching workspace root to: {}",
-            new_proj_root.display()
-        );
-        *root = new_proj_root.clone();
-        g.clear();
-        g.sync_workspace(&new_proj_root);
+    if let Some(new_proj_root) = find_project_root_for_path(&canon_target) {
+        let canon_new = new_proj_root.canonicalize().unwrap_or(new_proj_root);
+        if canon_new != *root {
+            let switch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                eprintln!(
+                    "[layer-mcp] Auto-switching workspace root to: {}",
+                    canon_new.display()
+                );
+                *root = canon_new.clone();
+                g.clear();
+                if let Some(ref mut idx) = pkg_indexer {
+                    idx.clear();
+                }
+                g.sync_workspace(&canon_new);
+            }));
+            if let Err(err) = switch_res {
+                eprintln!(
+                    "[layer-mcp] Warning: Panic while auto-switching workspace: {:?}",
+                    err
+                );
+            }
+        }
     }
 }
 
@@ -968,11 +1057,27 @@ pub fn execute_tool(
             return format!("Error: Target path '{}' is not a directory.", path_str);
         }
 
-        eprintln!("[layer-mcp] Workspace switched to: {}", canonical.display());
-        *root = canonical.clone();
-        g.clear();
-        pkg_indexer.clear();
-        g.sync_workspace(&canonical);
+        let switch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eprintln!("[layer-mcp] Workspace switched to: {}", canonical.display());
+            *root = canonical.clone();
+            g.clear();
+            pkg_indexer.clear();
+            g.sync_workspace(&canonical);
+        }));
+
+        if let Err(err) = switch_res {
+            let msg = if let Some(s) = err.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = err.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic during workspace sync".to_string()
+            };
+            return format!(
+                "Error: Panic while switching workspace to '{}': {}",
+                path_str, msg
+            );
+        }
 
         let res = json!({
             "success": true,
@@ -984,14 +1089,40 @@ pub fn execute_tool(
         return serde_json::to_string_pretty(&res).unwrap_or_default();
     }
 
-    // Auto-detect project root if agent supplied an absolute path pointing to a different project
+    // Auto-detect project root if agent supplied a path pointing to a different project or nested directory
     let candidate_path = args
         .get("path")
         .or_else(|| args.get("file"))
         .or_else(|| args.get("target_path"))
         .and_then(|v| v.as_str());
 
-    maybe_switch_workspace_root(root, g, candidate_path);
+    maybe_switch_workspace_root(root, g, candidate_path, Some(pkg_indexer));
+
+    // If current root has no recognized build config, but an immediate subdirectory does,
+    // automatically switch the active workspace root to that subdirectory!
+    if crate::verifier::ProjectType::detect(root) == crate::verifier::ProjectType::Unknown
+        && let Some(nested_root) = crate::verifier::detect_nested_project_root(root)
+    {
+        let canon = nested_root.canonicalize().unwrap_or(nested_root);
+        if canon.is_dir() && canon != *root {
+            let switch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                eprintln!(
+                    "[layer-mcp] Auto-detected nested project manifest at: {}. Switching active workspace.",
+                    canon.display()
+                );
+                *root = canon.clone();
+                g.clear();
+                pkg_indexer.clear();
+                g.sync_workspace(&canon);
+            }));
+            if let Err(err) = switch_res {
+                eprintln!(
+                    "[layer-mcp] Warning: Panic while switching to nested project root: {:?}",
+                    err
+                );
+            }
+        }
+    }
 
     // Synchronously sync workspace with disk to catch newly created/modified/deleted files
     g.sync_workspace(root);
@@ -1458,15 +1589,26 @@ pub fn execute_tool(
             ) {
                 Ok(res) => {
                     let target_path = dest_parent.join(project_name.trim());
-                    if let Ok(canon) = target_path.canonicalize() {
-                        eprintln!(
-                            "[layer-mcp] Auto-switching workspace root to bootstrapped project: {}",
-                            canon.display()
-                        );
-                        *root = canon.clone();
-                        g.clear();
-                        pkg_indexer.clear();
-                        g.sync_workspace(&canon);
+                    let new_root = target_path.canonicalize().unwrap_or(target_path);
+                    if new_root.is_dir() {
+                        let switch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || {
+                                eprintln!(
+                                    "[layer-mcp] Auto-switching workspace root to bootstrapped project: {}",
+                                    new_root.display()
+                                );
+                                *root = new_root.clone();
+                                g.clear();
+                                pkg_indexer.clear();
+                                g.sync_workspace(&new_root);
+                            },
+                        ));
+                        if let Err(err) = switch_res {
+                            eprintln!(
+                                "[layer-mcp] Warning: Panic while indexing bootstrapped project: {:?}",
+                                err
+                            );
+                        }
                     }
                     serde_json::to_string_pretty(&res).unwrap_or_default()
                 }
