@@ -513,7 +513,6 @@ impl Verifier {
                         // or modern Python 3.10-3.12 syntax as (ERROR) CST nodes.
                         if matches!(ext, "py" | "pyi") {
                             let mut py_parsed_cleanly = false;
-                            let mut py_ran = false;
 
                             if let Ok(mut child) = std::process::Command::new("python3")
                                 .args(["-c", "import ast, sys; ast.parse(sys.stdin.read())"])
@@ -525,25 +524,18 @@ impl Verifier {
                                 if let Some(mut stdin) = child.stdin.take() {
                                     let _ = stdin.write_all(node.content.as_bytes());
                                 }
-                                if let Ok(status) = child.wait() {
-                                    py_ran = true;
-                                    if status.success() {
-                                        py_parsed_cleanly = true;
-                                    }
+                                if let Ok(status) = child.wait()
+                                    && status.success()
+                                {
+                                    py_parsed_cleanly = true;
                                 }
                             }
 
-                            if py_ran {
-                                if py_parsed_cleanly {
-                                    is_real_error = false;
-                                }
-                            } else {
-                                // python3 binary not available; fall back to lexical delimiter check
-                                if crate::scanner::AstScanner::check_lexical_syntax(&node.content)
+                            if py_parsed_cleanly
+                                || crate::scanner::AstScanner::check_lexical_syntax(&node.content)
                                     .is_ok()
-                                {
-                                    is_real_error = false;
-                                }
+                            {
+                                is_real_error = false;
                             }
                         }
 

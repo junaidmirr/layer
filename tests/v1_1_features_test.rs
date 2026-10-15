@@ -761,3 +761,163 @@ fn test_scaffolded_tsconfig_universal_compatibility() {
     assert_eq!(react_opts.get("esModuleInterop").unwrap(), true);
     assert!(react_opts.get("useDefineForClassFields").is_none());
 }
+
+#[test]
+fn test_do_no_harm_advisory_architecture_defaults_and_python_with_tsconfig() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+    let mut pkg_indexer = PackageIndexer::new();
+    let mut root_buf = root.to_path_buf();
+
+    // 1. Workspace contains a tsconfig.json (e.g. from an existing or sibling setup)
+    std::fs::write(
+        root.join("tsconfig.json"),
+        r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true
+  }
+}"#,
+    )
+    .unwrap();
+
+    // 2. Write a modern Python 3.12 app.py using MCP execute_tool with DEFAULT options (auto_rollback_on_cascade omitted)
+    let python_code = r#"import sys
+
+def main():
+    info = {"engine": "Python", "version": 3.12}
+    # PEP 701 nested quotes in f-string
+    msg = f"Running {info['engine']} {info['version']:.2f}"
+    print(msg)
+
+if __name__ == "__main__":
+    main()
+"#;
+
+    let write_args = serde_json::json!({
+        "path": "app.py",
+        "content": python_code,
+        "verify_mode": "fast"
+        // auto_rollback_on_cascade omitted -> defaults to false
+    });
+
+    let res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "write_file",
+        Some(&write_args),
+        &mut pkg_indexer,
+    );
+
+    assert!(
+        !res_str.starts_with("Error:"),
+        "write_file should not error: {}",
+        res_str
+    );
+    let res_json: serde_json::Value = serde_json::from_str(&res_str).unwrap();
+
+    // Do No Harm Assertion: Must succeed and never roll back
+    assert!(
+        res_json["success"].as_bool().unwrap_or(false),
+        "write_file must succeed"
+    );
+    assert!(
+        !res_json["circuit_breaker"]["rolled_back"]
+            .as_bool()
+            .unwrap_or(false),
+        "Valid Python code must never be rolled back"
+    );
+    assert!(root.join("app.py").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("app.py")).unwrap(),
+        python_code
+    );
+    // Workspace root must not have been modified
+    assert_eq!(
+        root_buf.canonicalize().unwrap(),
+        root.canonicalize().unwrap()
+    );
+
+    // 3. Write a syntax-invalid file with DEFAULT options (auto_rollback_on_cascade omitted)
+    // The "Do No Harm" advisory architecture preserves the file on disk (success: true, rolled_back: false)
+    // and attaches non-blocking advisory diagnostics instead of deleting user/agent work!
+    let broken_code = "export function broken() { const x = ; return x; }";
+    let broken_args = serde_json::json!({
+        "path": "src/broken.ts",
+        "content": broken_code,
+        "verify_mode": "fast"
+        // auto_rollback_on_cascade omitted -> defaults to false
+    });
+
+    let broken_res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "write_file",
+        Some(&broken_args),
+        &mut pkg_indexer,
+    );
+
+    let broken_res_json: serde_json::Value = serde_json::from_str(&broken_res_str).unwrap();
+    assert!(
+        broken_res_json["success"].as_bool().unwrap_or(false),
+        "Default advisory write must report success: true"
+    );
+    assert!(
+        !broken_res_json["circuit_breaker"]["rolled_back"]
+            .as_bool()
+            .unwrap_or(false),
+        "Default advisory write must report rolled_back: false"
+    );
+    assert!(
+        broken_res_json["circuit_breaker"]["triggered"]
+            .as_bool()
+            .unwrap_or(false),
+        "Circuit breaker triggered flag is set to alert the agent"
+    );
+    // File remains preserved on disk
+    assert!(root.join("src/broken.ts").exists());
+
+    // 4. Agent can voluntarily call rollback_last_edit in 1ms if desired
+    let rollback_res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "rollback_last_edit",
+        None,
+        &mut pkg_indexer,
+    );
+    let rollback_res_json: serde_json::Value = serde_json::from_str(&rollback_res_str).unwrap();
+    assert!(rollback_res_json["success"].as_bool().unwrap_or(false));
+    // Broken file is now reverted
+    assert!(!root.join("src/broken.ts").exists());
+
+    // 5. Explicit auto_rollback_on_cascade: true preserves strict rollback behavior
+    let strict_broken_args = serde_json::json!({
+        "path": "src/strict_broken.ts",
+        "content": broken_code,
+        "verify_mode": "fast",
+        "auto_rollback_on_cascade": true
+    });
+
+    let strict_res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "write_file",
+        Some(&strict_broken_args),
+        &mut pkg_indexer,
+    );
+    let strict_res_json: serde_json::Value = serde_json::from_str(&strict_res_str).unwrap();
+    assert!(
+        !strict_res_json["success"].as_bool().unwrap_or(true),
+        "Explicit auto_rollback_on_cascade: true must report success: false"
+    );
+    assert!(
+        strict_res_json["circuit_breaker"]["rolled_back"]
+            .as_bool()
+            .unwrap_or(false),
+        "Explicit auto_rollback_on_cascade: true must report rolled_back: true"
+    );
+    assert!(!root.join("src/strict_broken.ts").exists());
+}

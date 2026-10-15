@@ -583,7 +583,7 @@ fn handle_rpc_method(
                                     },
                                     "auto_rollback_on_cascade": {
                                         "type": "boolean",
-                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: true)"
+                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: false)"
                                     }
                                 },
                                 "required": ["path", "content"]
@@ -618,7 +618,7 @@ fn handle_rpc_method(
                                     },
                                     "auto_rollback_on_cascade": {
                                         "type": "boolean",
-                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: true)"
+                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: false)"
                                     }
                                 },
                                 "required": ["path", "target", "replacement"]
@@ -1595,7 +1595,7 @@ pub fn execute_tool(
             let auto_rollback = args
                 .get("auto_rollback_on_cascade")
                 .and_then(|r| r.as_bool())
-                .unwrap_or(true);
+                .unwrap_or(false);
 
             let safe_rel = match resolve_safe_path(root, path_str) {
                 Ok(p) => p,
@@ -1628,7 +1628,7 @@ pub fn execute_tool(
             let auto_rollback = args
                 .get("auto_rollback_on_cascade")
                 .and_then(|r| r.as_bool())
-                .unwrap_or(true);
+                .unwrap_or(false);
 
             let safe_rel = match resolve_safe_path(root, path_str) {
                 Ok(p) => p,

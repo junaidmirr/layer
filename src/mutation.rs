@@ -338,14 +338,14 @@ impl MutationManager {
             let circuit_breaker = Some(CircuitBreakerReport {
                 triggered: true,
                 rolled_back,
-                reason,
+                reason: reason.clone(),
                 cascading_error_count: non_import_errors.len(),
                 broken_downstream_files: vec![],
                 advisory: if rolled_back {
                     "Auto-rolled back to previous state. Inspect syntax/type error before reapplying changes."
                         .to_string()
                 } else {
-                    "Fatal error in target file. Use `rollback_last_edit` to revert immediately."
+                    "Target file preserved on disk with advisory diagnostics. Pre-mutation snapshot saved; call `rollback_last_edit` to revert immediately if needed."
                         .to_string()
                 },
             });
@@ -364,6 +364,23 @@ impl MutationManager {
                     message: format!(
                         "Circuit Breaker Triggered: Edit to '{}' was automatically reverted due to fatal syntax or cascading errors.",
                         rel_path.display()
+                    ),
+                });
+            } else {
+                return Ok(MutationResult {
+                    success: true,
+                    operation: "write".to_string(),
+                    path: rel_path.to_string_lossy().to_string(),
+                    bytes_written,
+                    line_count,
+                    verification: Some(verif),
+                    circuit_breaker,
+                    pending_downstream_updates: Vec::new(),
+                    missing_imports_to_create_next,
+                    message: format!(
+                        "Successfully wrote '{}' (with advisory diagnostics: {}). Pre-mutation snapshot saved; call `rollback_last_edit` if you wish to revert.",
+                        rel_path.display(),
+                        reason
                     ),
                 });
             }
