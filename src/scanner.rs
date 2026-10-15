@@ -120,6 +120,139 @@ impl AstScanner {
         Some(usages)
     }
 
+    /// Find all AST-verified byte offset ranges `[start_byte, end_byte]` for a given identifier,
+    /// skipping comments and string literals.
+    pub fn find_identifier_occurrences(
+        content: &str,
+        ext: &str,
+        symbol_name: &str,
+    ) -> Vec<(usize, usize)> {
+        let clean_ext = ext.trim_start_matches('.').to_lowercase();
+        if let Some(lang) = Self::get_language(Some(&clean_ext))
+            && let Some(tree) = Self::parse_tree(content, &lang)
+        {
+            let mut ranges = Vec::new();
+            Self::walk_ast_identifier_ranges(
+                tree.root_node(),
+                content.as_bytes(),
+                symbol_name,
+                &mut ranges,
+            );
+            ranges.sort_unstable();
+            ranges.dedup();
+            return ranges;
+        }
+
+        // Lexical fallback for languages without embedded tree-sitter grammars
+        Self::find_lexical_identifier_ranges(content, symbol_name)
+    }
+
+    fn walk_ast_identifier_ranges(
+        node: Node,
+        source: &[u8],
+        symbol_name: &str,
+        ranges: &mut Vec<(usize, usize)>,
+    ) {
+        let kind = node.kind();
+        if kind.contains("comment")
+            || matches!(
+                kind,
+                "string_literal"
+                    | "raw_string_literal"
+                    | "string"
+                    | "string_content"
+                    | "template_string"
+            )
+        {
+            return;
+        }
+
+        if matches!(
+            kind,
+            "identifier"
+                | "type_identifier"
+                | "field_identifier"
+                | "property_identifier"
+                | "shorthand_property_identifier"
+                | "shorthand_property_identifier_pattern"
+        ) && let Ok(text) = node.utf8_text(source)
+            && text == symbol_name
+        {
+            ranges.push((node.start_byte(), node.end_byte()));
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            Self::walk_ast_identifier_ranges(child, source, symbol_name, ranges);
+        }
+    }
+
+    fn find_lexical_identifier_ranges(content: &str, symbol_name: &str) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let bytes = content.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        let sym_bytes = symbol_name.as_bytes();
+        let sym_len = sym_bytes.len();
+
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+
+        while i < len {
+            // Line comment
+            if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Block comment
+            if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                if i + 1 < len {
+                    i += 2;
+                }
+                continue;
+            }
+
+            // String literal
+            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                let quote = bytes[i];
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                    } else if bytes[i] == quote {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+
+            // Check identifier match
+            let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            if prev_ok && i + sym_len <= len && &bytes[i..i + sym_len] == sym_bytes {
+                let next_ok = i + sym_len == len || !is_ident_char(bytes[i + sym_len]);
+                if next_ok {
+                    ranges.push((i, i + sym_len));
+                    i += sym_len;
+                    continue;
+                }
+            }
+
+            i += 1;
+        }
+
+        ranges
+    }
+
     /// Fast lexical delimiter & balance check for languages without compiled Tree-sitter grammars (Swift, Kotlin, etc.)
     pub fn check_lexical_syntax(content: &str) -> Result<(), (usize, usize, String)> {
         let mut stack: Vec<(char, usize, usize)> = Vec::new();

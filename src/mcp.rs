@@ -549,6 +549,60 @@ fn handle_rpc_method(
                                 },
                                 "required": ["module_name", "files"]
                             }
+                        },
+                        {
+                            "name": "rename_symbol",
+                            "description": "Atomically rename a function, struct, interface, class, or variable across its declaration file and all dependent files in a single turn. Replaces exact AST code identifier occurrences while preserving strings and comments, with automatic rollback protection on syntax errors.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Relative path to file where the symbol is declared or used"
+                                    },
+                                    "old_name": {
+                                        "type": "string",
+                                        "description": "Current identifier name"
+                                    },
+                                    "new_name": {
+                                        "type": "string",
+                                        "description": "New identifier name (valid identifier)"
+                                    },
+                                    "verify_mode": {
+                                        "type": "string",
+                                        "enum": ["fast", "full", "none"],
+                                        "description": "Verification mode after rename: 'fast' (sub-15ms AST check), 'full' (compiler check), or 'none'. Defaults to 'fast'."
+                                    }
+                                },
+                                "required": ["path", "old_name", "new_name"]
+                            }
+                        },
+                        {
+                            "name": "verify_impacted_tests",
+                            "description": "Selectively discover and run only the test files impacted by modified code via VectorGraph dependency tracing and companion test patterns, skipping unaffected test suites to save tokens and time.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "changed_files": {
+                                        "type": "array",
+                                        "items": { "type": "string" },
+                                        "description": "Optional list of changed relative file paths. If omitted, uses the most recent mutation snapshot or all indexed files."
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "name": "get_session_stats",
+                            "description": "Retrieve Layer v1.1 ROI and session telemetry statistics, including total tool calls, surgical AST reads, estimated tokens saved, LLM turns saved, and a terminal dashboard summary.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "reset": {
+                                        "type": "boolean",
+                                        "description": "Optionally reset session statistics to zero."
+                                    }
+                                }
+                            }
                         }
                     ]
                 }
@@ -606,6 +660,69 @@ fn handle_rpc_method(
                 .open("/tmp/layer_mcp.log")
             {
                 let _ = f.write_all(log_line.as_bytes());
+            }
+
+            // Track ROI telemetry
+            if tool_name != "get_session_stats" {
+                let mut tracker = crate::telemetry::TelemetryTracker::load(root);
+                let elapsed_ms = duration.as_millis();
+
+                let (tokens_saved, turns_saved) = match tool_name {
+                    "inspect_package_api" => (2500, 1),
+                    "rename_symbol" => {
+                        let k = if let Ok(parsed) =
+                            serde_json::from_str::<serde_json::Value>(&content_text)
+                        {
+                            parsed
+                                .get("files_modified")
+                                .and_then(|f| f.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(1)
+                        } else {
+                            1
+                        };
+                        let turns = k.saturating_sub(1);
+                        (turns * 3500, turns)
+                    }
+                    "verify_impacted_tests" => {
+                        let skipped = if let Ok(parsed) =
+                            serde_json::from_str::<serde_json::Value>(&content_text)
+                        {
+                            parsed
+                                .get("skipped_test_files_count")
+                                .and_then(|s| s.as_u64())
+                                .unwrap_or(0) as usize
+                        } else {
+                            0
+                        };
+                        (skipped * 1200, 1)
+                    }
+                    "write_file" | "edit_file" => {
+                        if content_text.contains("SYNTAX_ERROR")
+                            || content_text.contains("syntax_error")
+                        {
+                            tracker.record_ast_catch();
+                        }
+                        if content_text.contains("\"rolled_back\": true") {
+                            tracker.record_circuit_breaker_save();
+                        }
+                        (0, 0)
+                    }
+                    "get_file_skeleton"
+                    | "find_symbol"
+                    | "get_symbol_body"
+                    | "get_callers"
+                    | "find_references"
+                    | "get_impact_radius"
+                    | "get_lines"
+                    | "get_tree"
+                    | "search"
+                    | "prepare_task_context" => (1200, 0),
+                    _ => (0, 0),
+                };
+
+                tracker.record_tool_call(tool_name, elapsed_ms, tokens_saved, turns_saved);
+                let _ = tracker.save(root);
             }
 
             let resp = json!({
@@ -1287,6 +1404,69 @@ fn execute_tool(
                 }
                 Err(e) => format!("Error: {}", e),
             }
+        }
+        "rename_symbol" => {
+            let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let old_name = args.get("old_name").and_then(|n| n.as_str()).unwrap_or("");
+            let new_name = args.get("new_name").and_then(|n| n.as_str()).unwrap_or("");
+            let verify_mode_str = args.get("verify_mode").and_then(|m| m.as_str());
+            let verify_mode = crate::mutation::VerifyMode::parse(verify_mode_str, None);
+
+            let rel_path = match resolve_safe_path(root, path_str) {
+                Ok(p) => p,
+                Err(e) => return format!("Error: Invalid path: {}", e),
+            };
+
+            match crate::mutation::MutationManager::rename_symbol(
+                root,
+                &rel_path,
+                old_name,
+                new_name,
+                verify_mode,
+                g,
+                Some(pkg_indexer),
+            ) {
+                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "verify_impacted_tests" => {
+            let changed_files: Option<Vec<String>> = args
+                .get("changed_files")
+                .and_then(|cf| cf.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                });
+
+            let res =
+                crate::verifier::Verifier::verify_impacted_tests(root, changed_files.as_deref(), g);
+            serde_json::to_string_pretty(&res).unwrap_or_default()
+        }
+        "get_session_stats" => {
+            let reset = args.get("reset").and_then(|r| r.as_bool()).unwrap_or(false);
+
+            let mut tracker = crate::telemetry::TelemetryTracker::load(root);
+            if reset {
+                let _ = tracker.reset(root);
+            }
+            let dashboard = tracker.format_dashboard();
+            let res = json!({
+                "total_tool_calls": tracker.total_tool_calls,
+                "surgical_ast_reads": tracker.surgical_ast_reads,
+                "estimated_tokens_saved": tracker.estimated_tokens_saved,
+                "llm_turns_saved": tracker.llm_turns_saved,
+                "ast_precheck_catches": tracker.ast_precheck_catches,
+                "circuit_breaker_saves": tracker.circuit_breaker_saves,
+                "package_apis_inspected": tracker.package_apis_inspected,
+                "cross_file_renames": tracker.cross_file_renames,
+                "selective_test_runs": tracker.selective_test_runs,
+                "total_execution_ms": tracker.total_execution_ms,
+                "dashboard": dashboard,
+                "tool_breakdown": tracker.tool_breakdown,
+            });
+            serde_json::to_string_pretty(&res).unwrap_or_default()
         }
         _ => format!("Unknown tool: {}", tool_name),
     }

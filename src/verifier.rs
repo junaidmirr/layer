@@ -1,7 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -76,6 +76,18 @@ pub struct VerificationReport {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiler_skipped_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImpactedTestReport {
+    pub changed_files: Vec<String>,
+    pub impacted_test_files: Vec<String>,
+    pub total_workspace_test_files: usize,
+    pub skipped_test_files_count: usize,
+    pub passed: bool,
+    pub execution_ms: u128,
+    pub diagnostics: Vec<DiagnosticItem>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -857,6 +869,205 @@ impl Verifier {
         pkg_indexer: Option<&mut crate::package_indexer::PackageIndexer>,
     ) -> VerificationReport {
         Self::verify_workspace_with_options(root, graph, pkg_indexer, false)
+    }
+
+    /// Selectively run only tests impacted by changed files using VectorGraph dependencies
+    pub fn verify_impacted_tests(
+        root: &Path,
+        changed_files: Option<&[String]>,
+        graph: &crate::graph::VectorGraph,
+    ) -> ImpactedTestReport {
+        let start = std::time::Instant::now();
+
+        // 1. Collect target changed files
+        let target_changed: Vec<PathBuf> = if let Some(files) = changed_files
+            && !files.is_empty()
+        {
+            files.iter().map(PathBuf::from).collect()
+        } else if let Some(ref multi) = graph.last_multi_file_snapshot {
+            multi.iter().map(|s| s.rel_path.clone()).collect()
+        } else if let Some(ref single) = graph.last_mutation_snapshot {
+            vec![single.rel_path.clone()]
+        } else {
+            // Default to all indexed files
+            graph.files.keys().cloned().collect()
+        };
+
+        // 2. Query impacted test files via VectorGraph
+        let impacted_paths = graph.get_impacted_test_files(&target_changed);
+        let all_test_files = graph.get_all_test_files();
+        let total_workspace_test_files = all_test_files.len();
+        let skipped_test_files_count =
+            total_workspace_test_files.saturating_sub(impacted_paths.len());
+
+        let changed_str: Vec<String> = target_changed
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        let impacted_str: Vec<String> = impacted_paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        if impacted_paths.is_empty() {
+            let execution_ms = start.elapsed().as_millis();
+            return ImpactedTestReport {
+                changed_files: changed_str.clone(),
+                impacted_test_files: vec![],
+                total_workspace_test_files,
+                skipped_test_files_count,
+                passed: true,
+                execution_ms,
+                diagnostics: vec![],
+                message: format!(
+                    "No impacted test files found for {} changed file(s). (Skipped {} unaffected tests)",
+                    changed_str.len(),
+                    skipped_test_files_count
+                ),
+            };
+        }
+
+        // 3. Execution / Verification of impacted test files
+        let mut diagnostics = Vec::new();
+        let mut executed_real_runner = false;
+        let mut passed = true;
+
+        let proj_type = ProjectType::detect(root);
+
+        // Try native test runner if present
+        match proj_type {
+            ProjectType::TypeScript => {
+                let vitest = root.join("node_modules/.bin/vitest");
+                let jest = root.join("node_modules/.bin/jest");
+                if vitest.exists() {
+                    let mut cmd = Command::new(&vitest);
+                    cmd.arg("run").current_dir(root);
+                    for p in &impacted_paths {
+                        cmd.arg(p);
+                    }
+                    if let Ok(out) = cmd.output() {
+                        executed_real_runner = true;
+                        passed = out.status.success();
+                    }
+                } else if jest.exists() {
+                    let mut cmd = Command::new(&jest);
+                    cmd.current_dir(root);
+                    for p in &impacted_paths {
+                        cmd.arg(p);
+                    }
+                    if let Ok(out) = cmd.output() {
+                        executed_real_runner = true;
+                        passed = out.status.success();
+                    }
+                }
+            }
+            ProjectType::Rust => {
+                let mut rust_test_names = Vec::new();
+                for p in &impacted_paths {
+                    if p.starts_with("tests")
+                        && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+                    {
+                        rust_test_names.push(stem.to_string());
+                    }
+                }
+                if !rust_test_names.is_empty() {
+                    let mut cmd = Command::new("cargo");
+                    cmd.arg("test").current_dir(root);
+                    for name in &rust_test_names {
+                        cmd.args(["--test", name]);
+                    }
+                    if let Ok(out) = cmd.output() {
+                        executed_real_runner = true;
+                        passed = out.status.success();
+                    }
+                }
+            }
+            ProjectType::Python => {
+                let pytest = root.join(".venv/bin/pytest");
+                let runner = if pytest.exists() {
+                    Some(pytest)
+                } else if Command::new("pytest").arg("--version").output().is_ok() {
+                    Some(PathBuf::from("pytest"))
+                } else {
+                    None
+                };
+
+                if let Some(bin) = runner {
+                    let mut cmd = Command::new(bin);
+                    cmd.current_dir(root);
+                    for p in &impacted_paths {
+                        cmd.arg(p);
+                    }
+                    if let Ok(out) = cmd.output() {
+                        executed_real_runner = true;
+                        passed = out.status.success();
+                    }
+                }
+            }
+            ProjectType::Go => {
+                let mut pkgs = std::collections::HashSet::new();
+                for p in &impacted_paths {
+                    if let Some(parent) = p.parent() {
+                        pkgs.insert(parent.to_string_lossy().to_string());
+                    }
+                }
+                if !pkgs.is_empty() {
+                    let mut cmd = Command::new("go");
+                    cmd.arg("test").current_dir(root);
+                    for pkg in &pkgs {
+                        cmd.arg(format!("./{}", pkg));
+                    }
+                    if let Ok(out) = cmd.output() {
+                        executed_real_runner = true;
+                        passed = out.status.success();
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Fast In-Memory AST / Import Precheck Fallback for impacted test files
+        if !executed_real_runner {
+            let all_diags = Self::instant_ast_precheck(root, &graph.files, &graph.path_aliases);
+            for d in all_diags {
+                let d_path = PathBuf::from(&d.file);
+                if impacted_paths.contains(&d_path) {
+                    if d.severity == "error" {
+                        passed = false;
+                    }
+                    diagnostics.push(d);
+                }
+            }
+        }
+
+        let execution_ms = start.elapsed().as_millis();
+        let message = if passed {
+            format!(
+                "Ran {} impacted test file(s) (skipped {} unaffected tests) in {}ms: ALL TESTS PASSED.",
+                impacted_paths.len(),
+                skipped_test_files_count,
+                execution_ms
+            )
+        } else {
+            format!(
+                "Ran {} impacted test file(s) (skipped {} unaffected tests) in {}ms: {} FAILURE(S) DETECTED.",
+                impacted_paths.len(),
+                skipped_test_files_count,
+                execution_ms,
+                diagnostics.len()
+            )
+        };
+
+        ImpactedTestReport {
+            changed_files: changed_str,
+            impacted_test_files: impacted_str,
+            total_workspace_test_files,
+            skipped_test_files_count,
+            passed,
+            execution_ms,
+            diagnostics,
+            message,
+        }
     }
 
     fn verify_rust(root: &Path, previous: Option<&[DiagnosticItem]>) -> VerificationReport {

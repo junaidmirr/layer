@@ -1,7 +1,9 @@
 use crate::graph::VectorGraph;
 use crate::package_indexer::PackageIndexer;
+use crate::scanner::AstScanner;
 use crate::verifier::{DiagnosticItem, VerificationReport, Verifier};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -80,6 +82,19 @@ pub struct RollbackResult {
     pub success: bool,
     pub path: String,
     pub previous_bytes: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameSymbolReport {
+    pub success: bool,
+    pub old_name: String,
+    pub new_name: String,
+    pub files_modified: Vec<String>,
+    pub total_occurrences_replaced: usize,
+    pub llm_turns_saved: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationReport>,
     pub message: String,
 }
 
@@ -394,11 +409,231 @@ impl MutationManager {
         )
     }
 
-    /// Roll back the most recent mutation from in-memory snapshot
+    /// Atomically rename an AST identifier across the definition file and all dependent files
+    pub fn rename_symbol(
+        root: &Path,
+        rel_path: &Path,
+        old_name: &str,
+        new_name: &str,
+        verify_mode: VerifyMode,
+        graph: &mut VectorGraph,
+        pkg_indexer: Option<&mut PackageIndexer>,
+    ) -> Result<RenameSymbolReport, String> {
+        let old_clean = old_name.trim();
+        let new_clean = new_name.trim();
+
+        if old_clean.is_empty() || new_clean.is_empty() {
+            return Err("Symbol names cannot be empty.".to_string());
+        }
+        if old_clean == new_clean {
+            return Err(format!(
+                "New name '{}' is identical to old name.",
+                new_clean
+            ));
+        }
+
+        // Validate new identifier
+        if !new_clean
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+            || new_clean.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return Err(format!("'{}' is not a valid identifier.", new_clean));
+        }
+
+        let abs_path = root.join(rel_path);
+        if !abs_path.exists() {
+            return Err(format!(
+                "Target file '{}' does not exist.",
+                rel_path.display()
+            ));
+        }
+
+        // Determine scope of candidate files:
+        // 1. The target file itself
+        // 2. All downstream dependents of target file
+        // 3. Any indexed file that imports or mentions old_name
+        let mut candidate_files: HashSet<PathBuf> = HashSet::new();
+        candidate_files.insert(crate::graph::normalize_relative_path(rel_path));
+
+        let dependents = graph.get_downstream_dependents(rel_path);
+        for dep in dependents {
+            candidate_files.insert(crate::graph::normalize_relative_path(&dep));
+        }
+
+        for (p, node) in &graph.files {
+            if node.content.contains(old_clean) {
+                candidate_files.insert(p.clone());
+            }
+        }
+
+        // Gather occurrences per candidate file
+        let mut affected_files_data = Vec::new();
+        for file_rel in &candidate_files {
+            let file_abs = root.join(file_rel);
+            if !file_abs.exists() {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&file_abs) else {
+                continue;
+            };
+            let ext = file_rel
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let occurrences = AstScanner::find_identifier_occurrences(&content, &ext, old_clean);
+            if !occurrences.is_empty() {
+                affected_files_data.push((file_rel.clone(), file_abs, content, occurrences));
+            }
+        }
+
+        if affected_files_data.is_empty() {
+            return Ok(RenameSymbolReport {
+                success: true,
+                old_name: old_clean.to_string(),
+                new_name: new_clean.to_string(),
+                files_modified: vec![],
+                total_occurrences_replaced: 0,
+                llm_turns_saved: 0,
+                verification: None,
+                message: format!(
+                    "Symbol '{}' was not found in any code occurrences in target or dependent files.",
+                    old_clean
+                ),
+            });
+        }
+
+        // Build transactional snapshot
+        let mut snapshots = Vec::new();
+        for (rel, _abs, content, _occ) in &affected_files_data {
+            snapshots.push(MutationSnapshot {
+                rel_path: rel.clone(),
+                previous_content: Some(content.clone()),
+                previous_hash: None,
+            });
+        }
+
+        // Apply replacements in descending byte order per file
+        let mut total_occurrences_replaced = 0;
+        let mut files_modified = Vec::new();
+
+        for (rel, abs, content, mut occurrences) in affected_files_data {
+            // Sort descending so earlier byte offsets don't shift
+            occurrences.sort_by_key(|b| std::cmp::Reverse(b.0));
+            total_occurrences_replaced += occurrences.len();
+
+            let mut new_content = content.clone();
+            for (start, end) in occurrences {
+                if start <= end && end <= new_content.len() {
+                    new_content.replace_range(start..end, new_clean);
+                }
+            }
+
+            if let Err(e) = fs::write(&abs, &new_content) {
+                // Roll back any files already written!
+                for s in &snapshots {
+                    if let Some(ref prev) = s.previous_content {
+                        let _ = fs::write(root.join(&s.rel_path), prev);
+                    }
+                }
+                return Err(format!(
+                    "Failed to write modified file '{}': {}",
+                    abs.display(),
+                    e
+                ));
+            }
+
+            files_modified.push(rel.to_string_lossy().to_string());
+        }
+
+        // Sync workspace graph immediately
+        graph.sync_workspace(root);
+
+        // Verification phase
+        let mut verification_report = None;
+        if verify_mode != VerifyMode::None {
+            // Check AST syntax across workspace
+            let precheck_diags =
+                Verifier::instant_ast_precheck(root, &graph.files, &graph.path_aliases);
+            let has_syntax_error = precheck_diags
+                .iter()
+                .any(|d| d.code.as_deref() == Some("SYNTAX_ERROR"));
+
+            if has_syntax_error {
+                // Auto-rollback all touched files!
+                for s in &snapshots {
+                    if let Some(ref prev) = s.previous_content {
+                        let _ = fs::write(root.join(&s.rel_path), prev);
+                    }
+                }
+                graph.sync_workspace(root);
+                return Err(
+                    "Rename caused syntax error across affected files; automatically rolled back all changes."
+                        .to_string(),
+                );
+            }
+
+            if verify_mode == VerifyMode::Full {
+                let rep = Verifier::verify_workspace_with_circuit_breaker(root, graph, pkg_indexer);
+                verification_report = Some(rep);
+            }
+        }
+
+        // Store multi-file snapshot for user rollback
+        graph.last_multi_file_snapshot = Some(snapshots);
+
+        let k = files_modified.len();
+        let llm_turns_saved = k.saturating_sub(1);
+
+        Ok(RenameSymbolReport {
+            success: true,
+            old_name: old_clean.to_string(),
+            new_name: new_clean.to_string(),
+            files_modified,
+            total_occurrences_replaced,
+            llm_turns_saved,
+            verification: verification_report,
+            message: format!(
+                "Successfully renamed '{}' to '{}' across {} file(s) ({} total occurrences replaced). Saved {} LLM turns.",
+                old_clean, new_clean, k, total_occurrences_replaced, llm_turns_saved
+            ),
+        })
+    }
+
+    /// Roll back the most recent mutation from in-memory snapshot (supports single-file and multi-file atomic rollbacks)
     pub fn rollback_last_edit(
         root: &Path,
         graph: &mut VectorGraph,
     ) -> Result<RollbackResult, String> {
+        // Multi-file atomic rollback
+        if let Some(multi) = graph.last_multi_file_snapshot.take() {
+            let mut total_bytes = 0;
+            let mut restored_files = Vec::new();
+            for s in &multi {
+                let abs = root.join(&s.rel_path);
+                if let Some(ref prev) = s.previous_content {
+                    let _ = fs::write(&abs, prev);
+                    total_bytes += prev.len();
+                } else if abs.exists() {
+                    let _ = fs::remove_file(&abs);
+                }
+                restored_files.push(s.rel_path.to_string_lossy().to_string());
+            }
+            graph.sync_workspace(root);
+            return Ok(RollbackResult {
+                success: true,
+                path: restored_files.join(", "),
+                previous_bytes: total_bytes,
+                message: format!(
+                    "Successfully rolled back multi-file operation across {} file(s).",
+                    restored_files.len()
+                ),
+            });
+        }
+
+        // Single-file rollback
         let snapshot = match graph.last_mutation_snapshot.take() {
             Some(s) => s,
             None => return Err("No previous edit snapshot available for rollback.".to_string()),

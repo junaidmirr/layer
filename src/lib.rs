@@ -11,6 +11,7 @@ pub mod mutation;
 pub mod package_indexer;
 pub mod scaffold;
 pub mod scanner;
+pub mod telemetry;
 pub mod verifier;
 pub mod walker;
 pub mod watcher;

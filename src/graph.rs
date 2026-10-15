@@ -9,7 +9,7 @@ use crate::walker::CodebaseScanner;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -42,6 +42,8 @@ pub struct VectorGraph {
     pub path_aliases: HashMap<String, String>,
     /// Last file mutation snapshot for circuit breaker and rollback
     pub last_mutation_snapshot: Option<crate::mutation::MutationSnapshot>,
+    /// Last multi-file mutation snapshot for atomic refactor rollback
+    pub last_multi_file_snapshot: Option<Vec<crate::mutation::MutationSnapshot>>,
 }
 
 impl Default for VectorGraph {
@@ -76,6 +78,7 @@ impl VectorGraph {
             last_verification: None,
             path_aliases: default_path_aliases(),
             last_mutation_snapshot: None,
+            last_multi_file_snapshot: None,
         }
     }
 
@@ -89,6 +92,7 @@ impl VectorGraph {
         self.last_verification = None;
         self.path_aliases = default_path_aliases();
         self.last_mutation_snapshot = None;
+        self.last_multi_file_snapshot = None;
     }
 
     /// Returns files that import `target_path` (incoming edges in dependency graph)
@@ -105,6 +109,104 @@ impl VectorGraph {
             }
         }
         dependents
+    }
+
+    /// Check whether a path represents a test file based on conventions across languages
+    pub fn is_test_file(path: &Path) -> bool {
+        let p_str = path.to_string_lossy().to_lowercase();
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        file_name.contains(".test.")
+            || file_name.contains(".spec.")
+            || file_name.starts_with("test_")
+            || file_name.ends_with("_test.py")
+            || file_name.ends_with("_test.go")
+            || file_name.ends_with("_test.rs")
+            || file_name.ends_with("_test.cpp")
+            || file_name.ends_with("_test.cc")
+            || file_name.ends_with("tests.swift")
+            || file_name.ends_with("test.kt")
+            || p_str.contains("/__tests__/")
+            || p_str.starts_with("__tests__/")
+            || (p_str.starts_with("tests/")
+                && path.extension().and_then(|e| e.to_str()) == Some("rs"))
+            || (p_str.contains("/tests/")
+                && path.extension().and_then(|e| e.to_str()) == Some("rs"))
+    }
+
+    /// Return all indexed test files in the workspace
+    pub fn get_all_test_files(&self) -> Vec<PathBuf> {
+        let mut tests: Vec<PathBuf> = self
+            .files
+            .keys()
+            .filter(|p| Self::is_test_file(p))
+            .cloned()
+            .collect();
+        tests.sort();
+        tests
+    }
+
+    /// Compute impacted test files for a set of changed files via transitive dependency graph + naming conventions
+    pub fn get_impacted_test_files(&self, changed_files: &[PathBuf]) -> Vec<PathBuf> {
+        let mut impacted = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+
+        for cf in changed_files {
+            let normalized = normalize_relative_path(cf);
+            if Self::is_test_file(&normalized) {
+                impacted.insert(normalized.clone());
+            }
+
+            // Direct naming companion check (e.g. engine.ts -> engine.test.ts or test_engine.py)
+            let stem = normalized
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if !stem.is_empty() {
+                for indexed in self.files.keys() {
+                    let idx_str = indexed.to_string_lossy();
+                    if Self::is_test_file(indexed)
+                        && (idx_str.contains(stem)
+                            || indexed.file_stem().and_then(|s| s.to_str()) == Some(stem))
+                    {
+                        impacted.insert(indexed.clone());
+                    }
+                }
+            }
+
+            // Also check if changed file itself contains inline tests (e.g. Rust #[cfg(test)])
+            if let Some(node) = self.files.get(&normalized)
+                && normalized.extension().and_then(|e| e.to_str()) == Some("rs")
+                && (node.content.contains("#[cfg(test)]") || node.content.contains("#[test]"))
+            {
+                impacted.insert(normalized.clone());
+            }
+
+            queue.push_back(normalized.clone());
+            visited.insert(normalized);
+        }
+
+        // Transitive BFS over incoming dependency edges (dependents)
+        while let Some(current) = queue.pop_front() {
+            let dependents = self.get_downstream_dependents(&current);
+            for dep in dependents {
+                if Self::is_test_file(&dep) {
+                    impacted.insert(dep.clone());
+                }
+                if visited.insert(dep.clone()) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+
+        let mut res: Vec<PathBuf> = impacted.into_iter().collect();
+        res.sort();
+        res
     }
 
     /// Insert or update a file node and re-index its chunks and graph connections

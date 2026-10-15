@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 [![Tree-sitter](https://img.shields.io/badge/Tree--sitter-Compiled%20Grammars-blueviolet.svg)](https://tree-sitter.github.io/tree-sitter/)
-[![MCP Compliant](https://img.shields.io/badge/MCP-19%20Tools%20%7C%2017%20CLI%20Commands-green.svg)](https://modelcontextprotocol.io)
+[![MCP Compliant](https://img.shields.io/badge/MCP-22%20Tools%20%7C%2018%20CLI%20Commands-green.svg)](https://modelcontextprotocol.io)
 
 **A high-performance Rust MCP (Model Context Protocol) server that sits between AI coding agents and codebases—performing surgical AST operations, dependency graph analysis, external package API inspection, and stateful error circuit-breaking in milliseconds.**
 
@@ -123,7 +123,7 @@ Layer provides universal intelligence across 9 major programming languages and e
 
 ---
 
-## Complete MCP Tool Inventory (19 Tools)
+## Complete MCP Tool Inventory (22 Tools)
 
 All tools are exposed over standard Model Context Protocol (MCP) JSON-RPC:
 
@@ -146,18 +146,23 @@ All tools are exposed over standard Model Context Protocol (MCP) JSON-RPC:
 - `inspect_package_api`: Inspect exact third-party package declarations (`.d.ts`, Rust signatures, Python stubs) before importing to prevent hallucinations.
 - `scaffold_template`: Scaffold pre-defined starter templates (e.g. `rust-cli`).
 
-### 3. Surgical File Mutation & Circuit Breaker
+### 3. Surgical File Mutation & Cross-File Refactoring
 - `write_file`: Write or create a file with automatic pre-mutation snapshotting, AST syntax validation, and circuit-breaker verification.
   - Supports `verify_mode`: `"fast"` (sub-15ms AST check), `"full"` (compiler typecheck), or `"none"`.
   - Returns `pending_downstream_updates` if an edit breaks downstream consumers during multi-file refactoring.
 - `edit_file`: Surgically apply contiguous edits with exact block matching, AST pre-checking, and automatic rollback on local syntax errors.
-- `rollback_last_edit`: Manually revert the most recent mutation from the snapshot buffer.
+- `rename_symbol`: Atomically rename any identifier or symbol across all files in the project in a single turn. Uses Tree-sitter CST analysis to strictly prune comments and strings, applies reverse byte order replacements, and automatically rolls back all touched files if any syntax error is introduced.
+- `rollback_last_edit`: Revert the most recent mutation from the snapshot buffer (supports atomic multi-file rollbacks).
 
-### 4. Verification & Lifecycle Tracking
+### 4. Verification & Selective Testing
 - `verify_project`: Run structured project verification with diagnostic comparisons against previous runs:
   - Tracks diagnostic states: `new_errors`, `persistent_errors`, and `resolved_errors`.
   - Automatically attaches `ground_truth_context` when errors persist across multiple attempts.
   - Guarantees `success: true` when 0 errors are present (never returns `success: false` with 0 diagnostics).
+- `verify_impacted_tests`: Graph-driven selective test runner. Traverses incoming dependency edges in the `VectorGraph` to run only tests impacted by the modified files, skipping unaffected test suites to save LLM turns and execution latency.
+
+### 5. Built-in ROI & Session Telemetry
+- `get_session_stats`: Inspect live session ROI metrics, including tool call counts, latency breakdown, estimated token savings, LLM turns saved, syntax errors caught, and circuit breaker interventions.
 
 ---
 
@@ -278,6 +283,12 @@ layer impact inspect_package_api
 
 # Run live file-watching daemon
 layer watch
+
+# Display live ROI & session telemetry dashboard
+layer stats
+
+# Reset telemetry session counters
+layer stats --reset
 ```
 
 ---
@@ -287,7 +298,7 @@ layer watch
 Layer maintains a rigorous, 100% passing test suite with zero warnings:
 
 ```bash
-# Run all 66 unit and integration tests
+# Run all 70 unit and integration tests across 7 test suites
 cargo test
 
 # Run Clippy checks

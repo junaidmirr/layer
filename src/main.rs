@@ -141,11 +141,38 @@ enum Commands {
     },
     /// Keep running as a live watching daemon
     Watch,
+    /// Display Layer ROI and session telemetry statistics
+    Stats {
+        /// Optional path to workspace root
+        #[arg(short, long)]
+        workspace: Option<PathBuf>,
+        /// Reset session statistics to zero
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let root = cli.path.canonicalize().unwrap_or(cli.path);
+
+    if let Some(Commands::Stats { workspace, reset }) = cli.command {
+        let target_root = workspace.unwrap_or_else(|| root.clone());
+        let mut tracker = layer::telemetry::TelemetryTracker::load(&target_root);
+        if reset {
+            let _ = tracker.reset(&target_root);
+            if !cli.quiet && !cli.json {
+                println!("{}", "Telemetry session metrics reset to zero.".green());
+            }
+        }
+
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&tracker)?);
+        } else {
+            print!("{}", tracker.format_dashboard());
+        }
+        return Ok(());
+    }
 
     let is_mcp = matches!(cli.command, Some(Commands::Mcp));
     let quiet = cli.quiet || cli.json || is_mcp;
@@ -664,6 +691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             }
         }
+        Some(Commands::Stats { .. }) => unreachable!(),
         None | Some(Commands::Repl) => {
             run_repl(graph_arc)?;
         }
