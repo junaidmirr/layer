@@ -153,7 +153,7 @@ export interface Particle {
         "Property 'radiux' does not exist on type 'Particle'. Did you mean 'radius'?",
     );
 
-    let comp1 = Verifier::compare_diagnostics(None, &[diag_run1.clone()]);
+    let comp1 = Verifier::compare_diagnostics(None, std::slice::from_ref(&diag_run1));
     assert_eq!(comp1.new_errors.len(), 1);
     assert_eq!(comp1.new_errors[0].occurrence_count, 1);
     assert!(comp1.persistent_errors.is_empty());
