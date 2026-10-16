@@ -294,8 +294,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let file_nodes = scanner.scan_all();
             if let Ok(mut g) = graph_bg.lock() {
                 for node in file_nodes {
-                    g.upsert_file(node);
+                    g.upsert_file_batch(node);
                 }
+                g.rebuild_all_edges();
             }
         });
     } else {
@@ -316,8 +317,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let mut g = graph_arc.lock().unwrap();
             for node in file_nodes {
-                g.upsert_file(node);
+                g.upsert_file_batch(node);
             }
+            g.rebuild_all_edges();
         }
         let elapsed = start_time.elapsed();
 

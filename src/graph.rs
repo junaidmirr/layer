@@ -219,7 +219,16 @@ impl VectorGraph {
     }
 
     /// Insert or update a file node and re-index its chunks and graph connections
-    pub fn upsert_file(&mut self, mut file: FileNode) {
+    pub fn upsert_file(&mut self, file: FileNode) {
+        self.upsert_file_internal(file, true);
+    }
+
+    /// Bulk version of upsert_file that defers graph edge rebuilding until all files are loaded
+    pub fn upsert_file_batch(&mut self, file: FileNode) {
+        self.upsert_file_internal(file, false);
+    }
+
+    fn upsert_file_internal(&mut self, mut file: FileNode, rebuild_edges: bool) {
         let path = file.relative_path.clone();
 
         // Concurrency Guard: Reject older indexing reads from overwriting newer state
@@ -238,71 +247,76 @@ impl VectorGraph {
             }
         }
 
-        // 1. Embed full file representation
-        let file_header = format!(
-            "File: {}\nSymbols: {}\n\n{}",
-            path.display(),
-            file.symbols
-                .iter()
-                .map(|s| format!("{} {}", s.kind, s.name))
-                .collect::<Vec<_>>()
-                .join(", "),
-            file.content
-        );
-        file.vector = self.embedder.embed(&file_header);
+        // 1. Embed full file representation (bounded preview)
+        if rebuild_edges {
+            let file_header = format!(
+                "File: {}\nSymbols: {}\n\n{}",
+                path.display(),
+                file.symbols
+                    .iter()
+                    .take(30)
+                    .map(|s| format!("{} {}", s.kind, s.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                safe_truncate_str(&file.content, 2048)
+            );
+            file.vector = self.embedder.embed(&file_header);
+        }
 
         // 2. Remove any previous chunks for this file
         self.chunks.retain(|c| c.file_path != path);
 
-        // 3. Create symbol-level chunks
-        let lines: Vec<&str> = file.content.lines().collect();
+        // 3. Create symbol-level chunks (skip during bulk loads to eliminate CPU overhead)
+        if rebuild_edges {
+            let lines: Vec<&str> = file.content.lines().collect();
 
-        for symbol in &file.symbols {
-            let start = symbol.start_line.saturating_sub(1);
-            let end = symbol.end_line.min(lines.len());
-            let symbol_snippet = if start < lines.len() && start < end {
-                lines[start..end].join("\n")
-            } else {
-                symbol.signature.clone()
-            };
+            for symbol in &file.symbols {
+                let start = symbol.start_line.saturating_sub(1);
+                let end = symbol.end_line.min(lines.len());
+                let symbol_snippet = if start < lines.len() && start < end {
+                    lines[start..end].join("\n")
+                } else {
+                    symbol.signature.clone()
+                };
 
-            let symbol_embed_text = format!(
-                "File: {}\nSymbol: {} {}\nDoc: {}\nCode:\n{}",
-                path.display(),
-                symbol.kind,
-                symbol.name,
-                symbol.doc_comment.as_deref().unwrap_or(""),
-                symbol_snippet
-            );
-            let vector = self.embedder.embed(&symbol_embed_text);
+                let symbol_embed_text = format!(
+                    "File: {}\nSymbol: {} {}\nDoc: {}\nCode:\n{}",
+                    path.display(),
+                    symbol.kind,
+                    symbol.name,
+                    symbol.doc_comment.as_deref().unwrap_or(""),
+                    symbol_snippet
+                );
+                let vector = self.embedder.embed(&symbol_embed_text);
 
+                self.chunks.push(FileChunk {
+                    id: format!("{}:{}", path.display(), symbol.name),
+                    file_path: path.clone(),
+                    start_line: symbol.start_line,
+                    end_line: symbol.end_line,
+                    content: symbol_snippet,
+                    symbol_name: Some(symbol.name.clone()),
+                    vector,
+                });
+            }
+
+            // Also add whole-file chunk
+            let max_preview = lines
+                .iter()
+                .take(50)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
             self.chunks.push(FileChunk {
-                id: format!("{}:{}", path.display(), symbol.name),
+                id: format!("{}:file", path.display()),
                 file_path: path.clone(),
-                start_line: symbol.start_line,
-                end_line: symbol.end_line,
-                content: symbol_snippet,
-                symbol_name: Some(symbol.name.clone()),
-                vector,
+                start_line: 1,
+                end_line: lines.len().max(1),
+                content: max_preview,
+                symbol_name: None,
+                vector: file.vector.clone(),
             });
         }
-
-        // Also add whole-file chunk
-        let max_preview = lines
-            .iter()
-            .take(50)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.chunks.push(FileChunk {
-            id: format!("{}:file", path.display()),
-            file_path: path.clone(),
-            start_line: 1,
-            end_line: lines.len().max(1),
-            content: max_preview,
-            symbol_name: None,
-            vector: file.vector.clone(),
-        });
 
         // 4. Update graph node
         let node_idx = match self.node_indices.get(&path) {
@@ -339,7 +353,9 @@ impl VectorGraph {
         }
 
         self.files.insert(path, file);
-        self.rebuild_edges_for_node(node_idx);
+        if rebuild_edges {
+            self.rebuild_edges_for_node(node_idx);
+        }
     }
 
     /// Remove a file from vector index and graph, recording a deletion event in history cache
@@ -485,7 +501,7 @@ impl VectorGraph {
                         rel_path.display()
                     );
                     any_changes = true;
-                    self.upsert_file(file_node);
+                    self.upsert_file_batch(file_node);
                 }
             }
         }
@@ -521,9 +537,20 @@ impl VectorGraph {
 
     /// Rebuild all dependency edges across the entire graph
     pub fn rebuild_all_edges(&mut self) {
+        let known_files: HashSet<PathBuf> = self.files.keys().cloned().collect();
+        let mut filename_index: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for path in self.files.keys() {
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                filename_index
+                    .entry(file_name.to_string())
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+
         let all_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
         for idx in all_indices {
-            self.rebuild_edges_for_node(idx);
+            self.rebuild_edges_for_node_indexed(idx, &known_files, &filename_index);
         }
     }
 
@@ -560,6 +587,25 @@ impl VectorGraph {
 
     /// Rebuild import/dependency edges for a specific file node
     fn rebuild_edges_for_node(&mut self, source_idx: NodeIndex) {
+        let known_files: HashSet<PathBuf> = self.files.keys().cloned().collect();
+        let mut filename_index: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for path in self.files.keys() {
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                filename_index
+                    .entry(file_name.to_string())
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+        self.rebuild_edges_for_node_indexed(source_idx, &known_files, &filename_index);
+    }
+
+    fn rebuild_edges_for_node_indexed(
+        &mut self,
+        source_idx: NodeIndex,
+        known_files: &HashSet<PathBuf>,
+        filename_index: &HashMap<String, Vec<PathBuf>>,
+    ) {
         // Clear old outgoing edges from this node so stale imports are never retained
         let edges_to_remove: Vec<_> = self
             .graph
@@ -573,7 +619,6 @@ impl VectorGraph {
         let source_path = self.graph[source_idx].clone();
         if let Some(file_node) = self.files.get(&source_path) {
             let imports = file_node.imports.clone();
-            let known_files: HashSet<PathBuf> = self.files.keys().cloned().collect();
 
             for import in imports {
                 let mut matched_target: Option<PathBuf> = None;
@@ -585,7 +630,7 @@ impl VectorGraph {
                     matched_target = resolve_module_import_path(
                         &source_path,
                         spec.as_str(),
-                        &known_files,
+                        known_files,
                         &self.path_aliases,
                     );
                 }
@@ -594,7 +639,7 @@ impl VectorGraph {
                 if matched_target.is_none()
                     && source_path.extension().and_then(|e| e.to_str()) == Some("rs")
                 {
-                    matched_target = resolve_rust_import_path(&source_path, &import, &known_files);
+                    matched_target = resolve_rust_import_path(&source_path, &import, known_files);
                 }
 
                 // 3. Try Python import resolution
@@ -605,7 +650,7 @@ impl VectorGraph {
                     )
                 {
                     matched_target =
-                        resolve_python_import_path(&source_path, &import, &known_files);
+                        resolve_python_import_path(&source_path, &import, known_files);
                 }
 
                 // 4. Try C/C++ include resolution
@@ -615,21 +660,26 @@ impl VectorGraph {
                         Some("c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hxx")
                     )
                 {
-                    matched_target = resolve_cpp_include_path(&source_path, &import, &known_files);
+                    matched_target = resolve_cpp_include_path(&source_path, &import, known_files);
                 }
 
                 // 5. Try Go package import resolution
                 if matched_target.is_none()
                     && source_path.extension().and_then(|e| e.to_str()) == Some("go")
                 {
-                    matched_target = resolve_go_import_path(&source_path, &import, &known_files);
+                    matched_target = resolve_go_import_path(&source_path, &import, known_files);
                 }
 
                 // 6. Try Java import resolution
                 if matched_target.is_none()
                     && source_path.extension().and_then(|e| e.to_str()) == Some("java")
                 {
-                    matched_target = resolve_java_import_path(&source_path, &import, &known_files);
+                    matched_target = resolve_java_import_path(
+                        &source_path,
+                        &import,
+                        known_files,
+                        Some(filename_index),
+                    );
                 }
 
                 // 7. Try C# using resolution
@@ -637,7 +687,7 @@ impl VectorGraph {
                     && source_path.extension().and_then(|e| e.to_str()) == Some("cs")
                 {
                     matched_target =
-                        resolve_csharp_import_path(&source_path, &import, &known_files);
+                        resolve_csharp_import_path(&source_path, &import, known_files);
                 }
 
                 // 8. Connect edge if target matched
@@ -646,23 +696,6 @@ impl VectorGraph {
                         && target_idx != source_idx
                     {
                         self.graph.update_edge(source_idx, target_idx, ());
-                    }
-                } else {
-                    // Fallback heuristic: match file stem if length >= 3
-                    for (other_path, &target_idx) in &self.node_indices {
-                        if *other_path == source_path {
-                            continue;
-                        }
-                        let other_str = other_path.to_string_lossy();
-                        let stem = other_path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        if (!stem.is_empty() && stem.len() >= 3 && import.contains(stem))
-                            || import.contains(&*other_str)
-                        {
-                            self.graph.update_edge(source_idx, target_idx, ());
-                        }
                     }
                 }
             }
@@ -1889,6 +1922,25 @@ pub fn resolve_rust_import_path(
         }
     }
 
+    // 3. direct module name or relative use (use target;, super::target;, target)
+    let raw = trimmed.strip_prefix("use ").unwrap_or(trimmed);
+    let raw = raw.strip_prefix("super::").unwrap_or(raw);
+    let raw = raw.strip_prefix("self::").unwrap_or(raw);
+    if let Some(first_seg) = raw.split([':', ';', ' ', '{', '}']).next() {
+        let mod_name = first_seg.trim();
+        if !mod_name.is_empty() {
+            let parent = source_path.parent().unwrap_or(Path::new(""));
+            let file_cand = normalize_relative_path(&parent.join(format!("{}.rs", mod_name)));
+            if known_files.contains(&file_cand) {
+                return Some(file_cand);
+            }
+            let mod_cand = normalize_relative_path(&parent.join(mod_name).join("mod.rs"));
+            if known_files.contains(&mod_cand) {
+                return Some(mod_cand);
+            }
+        }
+    }
+
     None
 }
 
@@ -2031,6 +2083,7 @@ pub fn resolve_java_import_path(
     _source_path: &Path,
     import: &str,
     known_files: &HashSet<PathBuf>,
+    filename_index: Option<&HashMap<String, Vec<PathBuf>>>,
 ) -> Option<PathBuf> {
     let trimmed = import.trim();
     let rest = trimmed.strip_prefix("import ")?.trim();
@@ -2042,11 +2095,24 @@ pub fn resolve_java_import_path(
 
     if let Some(pkg_prefix) = clean.strip_suffix(".*") {
         let pkg_rel = pkg_prefix.replace('.', "/");
-        for file in known_files {
-            if file.extension().and_then(|e| e.to_str()) == Some("java") {
-                let p_str = file.to_string_lossy();
-                if p_str.contains(&pkg_rel) {
-                    return Some(file.clone());
+        if let Some(fn_idx) = filename_index {
+            for paths in fn_idx.values() {
+                for file in paths {
+                    if file.extension().and_then(|e| e.to_str()) == Some("java") {
+                        let p_str = file.to_string_lossy();
+                        if p_str.contains(&pkg_rel) {
+                            return Some(file.clone());
+                        }
+                    }
+                }
+            }
+        } else {
+            for file in known_files {
+                if file.extension().and_then(|e| e.to_str()) == Some("java") {
+                    let p_str = file.to_string_lossy();
+                    if p_str.contains(&pkg_rel) {
+                        return Some(file.clone());
+                    }
                 }
             }
         }
@@ -2065,13 +2131,24 @@ pub fn resolve_java_import_path(
             }
         }
 
-        // Suffix match
+        // Fast filename index match
         let target_suffix = format!("{}.java", rel);
-        for file in known_files {
-            if file.extension().and_then(|e| e.to_str()) == Some("java") {
-                let f_str = file.to_string_lossy();
-                if f_str.ends_with(&target_suffix) {
-                    return Some(file.clone());
+        let class_filename = format!("{}.java", clean.split('.').last().unwrap_or(""));
+        if let Some(fn_idx) = filename_index {
+            if let Some(matching_files) = fn_idx.get(&class_filename) {
+                for file in matching_files {
+                    if file.ends_with(&target_suffix) {
+                        return Some(file.clone());
+                    }
+                }
+            }
+        } else {
+            for file in known_files {
+                if file.extension().and_then(|e| e.to_str()) == Some("java") {
+                    let f_str = file.to_string_lossy();
+                    if f_str.ends_with(&target_suffix) {
+                        return Some(file.clone());
+                    }
                 }
             }
         }

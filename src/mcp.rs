@@ -213,9 +213,14 @@ fn handle_rpc_method(
                         let graph_clone = Arc::clone(graph);
                         let root_clone = new_root.clone();
                         std::thread::spawn(move || {
+                            let scanner = crate::walker::CodebaseScanner::new(&root_clone);
+                            let file_nodes = scanner.scan_all();
                             if let Ok(mut g) = graph_clone.lock() {
                                 g.clear();
-                                g.sync_workspace(&root_clone);
+                                for node in file_nodes {
+                                    g.upsert_file_batch(node);
+                                }
+                                g.rebuild_all_edges();
                             }
                         });
                     }
@@ -230,9 +235,14 @@ fn handle_rpc_method(
                         let graph_clone = Arc::clone(graph);
                         let root_clone = new_root.clone();
                         std::thread::spawn(move || {
+                            let scanner = crate::walker::CodebaseScanner::new(&root_clone);
+                            let file_nodes = scanner.scan_all();
                             if let Ok(mut g) = graph_clone.lock() {
                                 g.clear();
-                                g.sync_workspace(&root_clone);
+                                for node in file_nodes {
+                                    g.upsert_file_batch(node);
+                                }
+                                g.rebuild_all_edges();
                             }
                         });
                     }
