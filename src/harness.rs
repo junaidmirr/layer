@@ -65,14 +65,13 @@ impl HarnessManager {
     pub fn get_directive_content() -> &'static str {
         r#"# Layer Codebase Intelligence & Greenfield Directives
 
-Always prioritize Layer MCP tools over native shell commands, file edits, or whole-file reading:
-- **Project Bootstrapping**: Use `bootstrap_project` (builds clean projects with non-stalling dependency installation, instant VectorGraph indexing, and offline fallbacks).
-- **Module Scaffolding**: Use `scaffold_module` to build multi-file architectural skeletons with typed interfaces and stubs in a single turn.
-- **API Ground-Truth**: Use `inspect_package_api` to inspect real package declarations (`.d.ts`, crates, Python stubs) before importing to prevent hallucinations.
-- **Surgical Code Mutations**: Use Layer's `write_file` and `edit_file` (validates syntax via Tree-sitter CST in <15ms before saving, with automatic rollback protection).
-- **Cross-File Refactoring**: Use `rename_symbol` to atomically rename symbols across all files without touching strings or comments.
-- **Verification & Selective Testing**: Use `verify_project` (tracks new/persistent/resolved error lifecycles) and `verify_impacted_tests` (runs only tests affected by recent edits).
-- **Context & Exploration**: Use `find_symbol`, `get_symbol_body`, and `get_file_skeleton` to navigate code in milliseconds without dumping whole files.
+Always prioritize Layer MCP tools (`mcp__layer__*` or `layer__*`) over shell commands (`rg`, `sed`, `cat`) and native file tools:
+- **Context & Exploration**: ALWAYS call `mcp__layer__find_symbol` / `find_symbol`, `mcp__layer__get_symbol_body` / `get_symbol_body`, and `mcp__layer__get_file_skeleton` to navigate code in milliseconds instead of `rg` or reading whole files.
+- **Precision File Slicing**: Call `mcp__layer__get_lines` / `get_lines` instead of `sed` or `cat`.
+- **Surgical Code Mutations**: Use Layer's `mcp__layer__write_file` / `write_file` and `mcp__layer__edit_file` / `edit_file` (validates syntax via Tree-sitter CST in <15ms before saving, with automatic rollback protection).
+- **Verification & Selective Testing**: Use `mcp__layer__verify_project` / `verify_project` (tracks new/persistent/resolved error lifecycles) and `mcp__layer__verify_impacted_tests`.
+- **API Ground-Truth**: Use `mcp__layer__inspect_package_api` to inspect real package declarations (`.d.ts`, crates, Python stubs) before importing to prevent hallucinations.
+- **Project Bootstrapping & Scaffolding**: Use `mcp__layer__bootstrap_project` and `mcp__layer__scaffold_module`.
 "#
     }
 
