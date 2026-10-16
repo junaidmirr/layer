@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Parser, Debug)]
 #[command(name = "layer")]
-#[command(about = "Intelligent Codebase Context Engine & Vector Graph Layer", long_about = None)]
+#[command(version, about = "Intelligent Codebase Context Engine & Vector Graph Layer", long_about = None)]
 struct Cli {
     /// Root path of the codebase to analyze (defaults to current directory)
     #[arg(short, long, global = true, default_value = ".")]

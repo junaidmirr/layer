@@ -103,11 +103,21 @@ flowchart TD
    - Categorizes diagnostics into `new`, `persistent`, and `resolved`.
    - When an error persists across 2+ turns, Layer engages the **Circuit Breaker**, auto-injecting verified type signatures and definitions directly into the prompt to halt trial-and-error loops.
 
+4. **Task-Aware Context Compilation (HACS)**:
+   - Replaces manual whole-file exploration with BM25F multi-field scoring (name, path, signature, docstring), Personalized PageRank (PPR) graph expansion, and companion test pairing.
+   - Generates compact, token-budgeted holographic source slices with exact 1-indexed line numbers, eliminating 3–5 redundant grep/read turns per task.
+
+5. **Lock-Free Massive-Repo Scalability (v1.3)**:
+   - **Zero Mutex Contention**: Background indexing builds graphs off-lock and swaps atomically (`*g = local_graph;`), so incoming agent queries never wait on large repository scans.
+   - **Cold-Start Fast-Path (`fast_seed_scan`)**: Bounded $\le 250\text{ms}$ priority seed scanner for Turn 1 queries on cold repositories.
+   - **$O(1)$ Hash Lookups**: `stem_index`, `suffix_index`, `dir_index`, and `test_by_stem` tables replace $O(N \cdot M)$ full-repo scans, querying 10,000+ symbols in **<40ms** with a hard 450ms deadline guard.
+   - **"Do No Harm" Advisory Architecture**: `auto_rollback_on_cascade` defaults to `false`, eliminating false-positive rollbacks on modern language syntax (Python 3.12 PEP 701, TS 5.x).
+
 ---
 
 ## Universal Polyglot Support Matrix
 
-Layer provides universal intelligence across 9 major programming languages and environments:
+Layer provides universal intelligence across 25+ programming languages using compiled Tree-sitter grammars and the ULBA (Universal Lexical & Block Automaton) engine:
 
 | Language | AST Symbol & Graph Extraction | <15ms AST Syntax Pre-Check | External Package & Header Inspection | Multi-File Skeleton Scaffolding | Compiler Verification & Error Lifecycle |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -116,10 +126,11 @@ Layer provides universal intelligence across 9 major programming languages and e
 | **Python** | ✅ Full Tree-sitter | ✅ Instant | ✅ `.venv`, stubs + built-in fallback | ✅ Classes & `NotImplementedError` | ✅ `pyright` / AST fallback |
 | **Go** | ✅ Full Tree-sitter | ✅ Instant | ✅ `go.mod` & package signatures | ✅ Structs, funcs & `panic()` | ✅ `go vet` / AST fallback |
 | **C / C++** | ✅ Full Tree-sitter | ✅ Instant | ✅ `#include` headers + built-in fallback | ✅ `#pragma once`, headers & stubs | ✅ AST fallback |
-| **Swift** | ✅ OOP Scanner | ✅ Instant | ✅ SPM `Package.swift` | ✅ Protocols & `fatalError()` | ✅ AST fallback |
-| **Kotlin** | ✅ OOP Scanner | ✅ Instant | ✅ Gradle dependencies | ✅ Data classes & `TODO()` | ✅ AST fallback |
-| **C#** | ✅ OOP Scanner | ✅ Instant | ✅ ASP.NET & JSON fallbacks | ✅ Classes & `NotImplementedException` | ✅ AST fallback |
-| **Java** | ✅ OOP Scanner | ✅ Instant | ✅ Spring Boot & Web fallbacks | ✅ Classes & `UnsupportedOperationException` | ✅ AST fallback |
+| **Java** | ✅ ULBA + OOP | ✅ Instant | ✅ Spring Boot & Web fallbacks | ✅ Classes & `UnsupportedOperationException` | ✅ `javac` / AST fallback |
+| **C#** | ✅ ULBA + OOP | ✅ Instant | ✅ ASP.NET & JSON fallbacks | ✅ Classes & `NotImplementedException` | ✅ `dotnet` / AST fallback |
+| **Swift** | ✅ ULBA + OOP | ✅ Instant | ✅ SPM `Package.swift` | ✅ Protocols & `fatalError()` | ✅ AST fallback |
+| **Kotlin** | ✅ ULBA + OOP | ✅ Instant | ✅ Gradle dependencies | ✅ Data classes & `TODO()` | ✅ AST fallback |
+| **Ruby / PHP / Scala / Dart / Zig / Elixir / Lua / SQL / Shell** | ✅ ULBA Automaton | ✅ Instant | ✅ Package manifests | ✅ Polyglot stubs | ✅ AST fallback |
 
 ---
 
@@ -307,11 +318,11 @@ layer init --alias
 Layer maintains a rigorous, 100% passing test suite with zero warnings:
 
 ```bash
-# Run all 76 unit and integration tests across 8 test suites
+# Run all 101 unit and integration tests across 10 test suites
 cargo test
 
 # Run Clippy checks
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Verify formatting
 cargo fmt --check
