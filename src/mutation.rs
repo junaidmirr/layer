@@ -144,6 +144,8 @@ pub struct RenameSymbolReport {
     pub llm_turns_saved: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub message: String,
 }
 
@@ -162,6 +164,36 @@ impl MutationManager {
         pkg_indexer: Option<&mut PackageIndexer>,
     ) -> Result<MutationResult, String> {
         let abs_path = root.join(rel_path);
+
+        // Security: Ensure target and its parent directory do not escape workspace root via symlinks
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if let Some(parent) = abs_path.parent() {
+            let mut check_ancestor = parent.to_path_buf();
+            while !check_ancestor.exists() {
+                if let Some(p) = check_ancestor.parent() {
+                    check_ancestor = p.to_path_buf();
+                } else {
+                    break;
+                }
+            }
+            if let Ok(canon_anc) = check_ancestor.canonicalize()
+                && !canon_anc.starts_with(&canonical_root)
+            {
+                return Err(format!(
+                    "Access denied: Target directory for '{}' resolves outside workspace root via symlink.",
+                    rel_path.display()
+                ));
+            }
+        }
+        if abs_path.exists()
+            && let Ok(canon_target) = abs_path.canonicalize()
+            && !canon_target.starts_with(&canonical_root)
+        {
+            return Err(format!(
+                "Access denied: Target path '{}' resolves outside workspace root via symlink.",
+                rel_path.display()
+            ));
+        }
 
         // 1. Take lightweight pre-edit snapshot
         let prev_content = if abs_path.exists() {
@@ -561,20 +593,46 @@ impl MutationManager {
         }
 
         // Determine scope of candidate files:
-        // 1. The target file itself
-        // 2. All downstream dependents of target file
-        // 3. Any indexed file that imports or mentions old_name
+        // 1. The target definition file itself
+        // 2. Verified downstream dependents that import target file and do NOT define a conflicting symbol
         let mut candidate_files: HashSet<PathBuf> = HashSet::new();
-        candidate_files.insert(crate::graph::normalize_relative_path(rel_path));
+        let target_norm = crate::graph::normalize_relative_path(rel_path);
+        candidate_files.insert(target_norm.clone());
 
         let dependents = graph.get_downstream_dependents(rel_path);
+        let mut warnings: Vec<String> = Vec::new();
+
         for dep in dependents {
-            candidate_files.insert(crate::graph::normalize_relative_path(&dep));
+            let dep_norm = crate::graph::normalize_relative_path(&dep);
+            if dep_norm == target_norm {
+                continue;
+            }
+
+            // Check if dependent file defines its own top-level symbol with old_clean (name collision/shadowing)
+            if let Some(dep_node) = graph.files.get(&dep_norm)
+                && dep_node.symbols.iter().any(|s| s.name == old_clean)
+            {
+                warnings.push(format!(
+                    "Advisory: Dependent file '{}' defines its own symbol '{}'; skipped to prevent inadvertent name collision.",
+                    dep_norm.display(),
+                    old_clean
+                ));
+                continue;
+            }
+
+            candidate_files.insert(dep_norm);
         }
 
+        // Warn on any unlinked workspace files that contain old_clean as a token but have no import edge
         for (p, node) in &graph.files {
-            if node.content.contains(old_clean) {
-                candidate_files.insert(p.clone());
+            let p_norm = crate::graph::normalize_relative_path(p);
+            if !candidate_files.contains(&p_norm) && node.content.contains(old_clean) {
+                warnings.push(format!(
+                    "Advisory: File '{}' contains identifier '{}' but has no dependency or import connection to '{}'; skipped to avoid cross-module collision.",
+                    p_norm.display(),
+                    old_clean,
+                    rel_path.display()
+                ));
             }
         }
 
@@ -609,6 +667,7 @@ impl MutationManager {
                 total_occurrences_replaced: 0,
                 llm_turns_saved: 0,
                 verification: None,
+                warnings,
                 message: format!(
                     "Symbol '{}' was not found in any code occurrences in target or dependent files.",
                     old_clean
@@ -711,8 +770,9 @@ impl MutationManager {
             total_occurrences_replaced,
             llm_turns_saved,
             verification: verification_report,
+            warnings,
             message: format!(
-                "Successfully renamed '{}' to '{}' across {} file(s) ({} total occurrences replaced). Saved {} LLM turns.",
+                "Successfully renamed '{}' to '{}' across {} file(s) ({} total occurrences replaced, AST-scoped identifier refactoring). Saved {} LLM turns.",
                 old_clean, new_clean, k, total_occurrences_replaced, llm_turns_saved
             ),
         })

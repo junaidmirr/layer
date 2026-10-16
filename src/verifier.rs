@@ -94,6 +94,10 @@ pub struct VerificationReport {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiler_skipped_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -970,6 +974,11 @@ impl Verifier {
                 comparison: None,
                 message: "No recognized build configuration found in workspace root.".to_string(),
                 compiler_skipped_reason: None,
+                verification_tier: Some("none".to_string()),
+                scope_notice: Some(
+                    "No supported compiler or project manifest detected in workspace root."
+                        .to_string(),
+                ),
             },
         }
     }
@@ -1041,6 +1050,8 @@ impl Verifier {
             comparison: Some(comparison),
             message,
             compiler_skipped_reason,
+            verification_tier: Some("fast_ast_precheck".to_string()),
+            scope_notice: Some("Fast in-memory AST syntax and static import pre-check (<5ms). Compiler type-checking was not executed.".to_string()),
         }
     }
 
@@ -1101,6 +1112,12 @@ impl Verifier {
                         "Pre-check detected AST syntax/import errors; external compiler subprocess bypassed"
                             .to_string(),
                     ),
+                    verification_tier: Some("incremental_scope".to_string()),
+                    scope_notice: Some(format!(
+                        "Notice: Large-repository verification was scoped to {} modified file(s) and their direct dependents ({} total files). Unmodified workspace files were not evaluated.",
+                        graph.session_modified_files.len(),
+                        allowed.len()
+                    )),
                 };
             } else {
                 return VerificationReport {
@@ -1118,6 +1135,12 @@ impl Verifier {
                         "Large repository incremental verification: modified files and direct dependents verified cleanly in <5ms."
                             .to_string(),
                     ),
+                    verification_tier: Some("incremental_scope".to_string()),
+                    scope_notice: Some(format!(
+                        "Notice: Large-repository verification was scoped to {} modified file(s) and their direct dependents ({} total files). Unmodified workspace files were not evaluated.",
+                        graph.session_modified_files.len(),
+                        allowed.len()
+                    )),
                 };
             }
         }
@@ -1151,6 +1174,8 @@ impl Verifier {
                     "Pre-check detected AST syntax/import errors; external compiler subprocess bypassed"
                         .to_string(),
                 ),
+                verification_tier: Some("fast_ast_precheck".to_string()),
+                scope_notice: Some("Fast in-memory AST syntax and import pre-check detected errors (<5ms); external compiler subprocess bypassed.".to_string()),
             };
         }
 
@@ -1429,6 +1454,8 @@ impl Verifier {
                     comparison: None,
                     message: err_msg,
                     compiler_skipped_reason: None,
+                    verification_tier: Some("compiler_spawn_failed".to_string()),
+                    scope_notice: Some("Failed to spawn `cargo check` subprocess.".to_string()),
                 };
             }
         };
@@ -1482,6 +1509,8 @@ impl Verifier {
             comparison,
             message,
             compiler_skipped_reason: None,
+            verification_tier: Some("full_compiler".to_string()),
+            scope_notice: None,
         }
     }
 
@@ -1536,6 +1565,10 @@ impl Verifier {
                 comparison: Some(comparison),
                 message,
                 compiler_skipped_reason: skipped_reason,
+                verification_tier: Some("ast_syntax_and_import_only".to_string()),
+                scope_notice: Some(
+                    "Warning: TypeScript compiler (tsc) was unavailable. Performed CST syntax and static import checks only. Type checking, overload resolution, and compiler type errors were not evaluated.".to_string(),
+                ),
             };
         }
 
@@ -1590,6 +1623,11 @@ impl Verifier {
                     comparison: None,
                     message: err_msg,
                     compiler_skipped_reason: None,
+                    verification_tier: Some("compiler_spawn_failed".to_string()),
+                    scope_notice: Some(format!(
+                        "Failed to invoke TypeScript compiler `{}`.",
+                        tsc_bin
+                    )),
                 };
             }
         };
@@ -1658,6 +1696,8 @@ impl Verifier {
             comparison,
             message,
             compiler_skipped_reason: None,
+            verification_tier: Some("full_compiler".to_string()),
+            scope_notice: None,
         }
     }
 
@@ -1716,6 +1756,11 @@ impl Verifier {
             comparison: Some(comparison),
             message,
             compiler_skipped_reason: skipped_reason,
+            verification_tier: Some("ast_syntax_and_import_only".to_string()),
+            scope_notice: Some(format!(
+                "Warning: {} toolchain is not installed or was bypassed. Performed CST syntax and static import checks only. Deep compiler type-checking, overload resolution, and borrow-checking were not evaluated.",
+                toolchain_name
+            )),
         }
     }
 
@@ -1783,6 +1828,8 @@ impl Verifier {
                 comparison,
                 message,
                 compiler_skipped_reason: None,
+                verification_tier: Some("full_compiler".to_string()),
+                scope_notice: None,
             };
         }
 
@@ -1840,6 +1887,8 @@ impl Verifier {
                     comparison,
                     message,
                     compiler_skipped_reason: None,
+                    verification_tier: Some("full_compiler".to_string()),
+                    scope_notice: None,
                 };
             }
         }

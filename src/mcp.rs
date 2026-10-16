@@ -734,7 +734,7 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "rename_symbol",
-                            "description": "Atomically rename code identifier across all declaring and dependent files.",
+                            "description": "Atomically rename an AST identifier across its declaring file and verified dependent files (AST-scoped identifier refactoring; verify semantics with verify_project).",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -1201,25 +1201,107 @@ pub fn resolve_safe_path(root: &Path, raw_path: &str) -> Result<PathBuf, String>
         canonical_root.join(input_path)
     };
 
-    let canonical_target = match candidate.canonicalize() {
-        Ok(ct) => ct,
-        Err(_) => {
-            // Path doesn't exist on disk yet, normalize components
-            use std::path::Component;
-            let mut normalized = PathBuf::new();
-            for comp in candidate.components() {
-                match comp {
-                    Component::ParentDir => {
-                        normalized.pop();
-                    }
-                    Component::Normal(c) => normalized.push(c),
-                    Component::RootDir => normalized.push("/"),
-                    _ => {}
-                }
+    // First normalize lexical .. and . components from candidate relative to root
+    use std::path::Component;
+    let mut normalized_candidate = PathBuf::new();
+    for comp in candidate.components() {
+        match comp {
+            Component::ParentDir => {
+                normalized_candidate.pop();
             }
-            normalized
+            Component::Normal(c) => normalized_candidate.push(c),
+            Component::RootDir => normalized_candidate.push("/"),
+            Component::Prefix(p) => normalized_candidate.push(Component::Prefix(p).as_os_str()),
+            Component::CurDir => {}
+        }
+    }
+
+    // Find the closest existing ancestor on the filesystem to canonicalize
+    let mut existing_ancestor = normalized_candidate.clone();
+    let mut non_existent_suffix = Vec::new();
+
+    while !existing_ancestor.exists() {
+        if let Ok(meta) = std::fs::symlink_metadata(&existing_ancestor)
+            && meta.file_type().is_symlink()
+        {
+            // The ancestor itself is a symlink (possibly broken or pointing outside)
+            let resolved = match existing_ancestor.canonicalize() {
+                Ok(r) => r,
+                Err(_) => match std::fs::read_link(&existing_ancestor) {
+                    Ok(target) => {
+                        if target.is_absolute() {
+                            target
+                        } else {
+                            existing_ancestor
+                                .parent()
+                                .unwrap_or(&canonical_root)
+                                .join(target)
+                        }
+                    }
+                    Err(_) => {
+                        return Err(format!(
+                            "Error: Access denied. Path '{}' traverses an unresolvable symlink.",
+                            raw_path
+                        ));
+                    }
+                },
+            };
+            if !resolved.starts_with(&canonical_root) {
+                return Err(format!(
+                    "Error: Access denied. Path '{}' is outside workspace root (traverses external symlink).",
+                    raw_path
+                ));
+            }
+        }
+
+        if let Some(name) = existing_ancestor.file_name() {
+            non_existent_suffix.push(name.to_os_string());
+        }
+        if let Some(parent) = existing_ancestor.parent() {
+            existing_ancestor = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    non_existent_suffix.reverse();
+
+    // Canonicalize the existing ancestor directory to resolve any symlinks along the real path
+    let canonical_ancestor = match existing_ancestor.canonicalize() {
+        Ok(ca) => ca,
+        Err(_) => {
+            return Err(format!(
+                "Error: Access denied. Failed to resolve directory containment for '{}'.",
+                raw_path
+            ));
         }
     };
+
+    // Ensure the existing ancestor (after resolving symlinks) is strictly inside canonical_root
+    if !canonical_ancestor.starts_with(&canonical_root) {
+        return Err(format!(
+            "Error: Access denied. Path '{}' is outside workspace root.",
+            raw_path
+        ));
+    }
+
+    // Reconstruct the real canonical target starting from the canonical ancestor
+    let mut true_target = canonical_ancestor;
+    for comp in non_existent_suffix {
+        true_target.push(comp);
+    }
+
+    let mut canonical_target = PathBuf::new();
+    for comp in true_target.components() {
+        match comp {
+            Component::ParentDir => {
+                canonical_target.pop();
+            }
+            Component::Normal(c) => canonical_target.push(c),
+            Component::RootDir => canonical_target.push("/"),
+            Component::Prefix(p) => canonical_target.push(Component::Prefix(p).as_os_str()),
+            Component::CurDir => {}
+        }
+    }
 
     if !canonical_target.starts_with(&canonical_root) {
         return Err(format!(

@@ -951,8 +951,8 @@ fn test_compact_json_responses_and_clean_edit_receipts() {
         "MCP response should be compact single-line JSON without newlines"
     );
     assert!(
-        res_str.len() < 350,
-        "Clean edit receipt should be compact (<350 bytes), was {}",
+        res_str.len() < 550,
+        "Clean edit receipt should be compact (<550 bytes), was {}",
         res_str.len()
     );
 
@@ -1544,5 +1544,152 @@ public class TableHandler{i} {{
             .iter()
             .any(|s| s.file.contains("StorageProxy.java")),
         "Expected code slice from StorageProxy.java"
+    );
+}
+
+#[test]
+fn test_path_containment_rejects_symlink_traversal_outside_workspace() {
+    let ws_dir = tempdir().unwrap();
+    let root = ws_dir.path();
+    let outside_dir = tempdir().unwrap();
+    let outside_root = outside_dir.path();
+
+    // Create a symlink inside workspace pointing to external directory
+    let symlink_dir = root.join("sym_ext");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside_root, &symlink_dir).unwrap();
+
+    // 1. Attempt resolve_safe_path to a non-existent file inside symlink_dir
+    let resolved = layer::mcp::resolve_safe_path(root, "sym_ext/malicious_file.txt");
+    assert!(
+        resolved.is_err(),
+        "Must reject path traversing symlink pointing outside workspace"
+    );
+    let err = resolved.unwrap_err();
+    assert!(
+        err.contains("traverses a symlink pointing outside")
+            || err.contains("outside workspace root"),
+        "Unexpected error: {}",
+        err
+    );
+
+    // 2. Attempt write_file through symlink
+    let mut graph = VectorGraph::new();
+    let write_res = MutationManager::write_file(
+        root,
+        Path::new("sym_ext/malicious_write.txt"),
+        "secret = 42",
+        VerifyMode::None,
+        false,
+        &mut graph,
+        None,
+    );
+    assert!(
+        write_res.is_err(),
+        "write_file must reject path traversing symlink outside workspace"
+    );
+
+    // Ensure external directory was not written to
+    assert!(!outside_root.join("malicious_file.txt").exists());
+    assert!(!outside_root.join("malicious_write.txt").exists());
+}
+
+#[test]
+fn test_rename_symbol_does_not_cross_pollinate_unrelated_modules() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+
+    // module_a defines fn parse() and caller_a calls it
+    let mod_a = "export function parse(input: string): string { return input; }\n";
+    let caller_a =
+        "import { parse } from './mod_a';\nexport function run() { return parse('hello'); }\n";
+
+    // module_b is completely unrelated and also defines fn parse()
+    let mod_b = "export function parse(count: number): number { return count * 2; }\n";
+
+    fs::write(root.join("mod_a.ts"), mod_a).unwrap();
+    fs::write(root.join("caller_a.ts"), caller_a).unwrap();
+    fs::write(root.join("mod_b.ts"), mod_b).unwrap();
+
+    graph.sync_workspace(root);
+
+    let mut pkg_indexer = PackageIndexer::new();
+    let rename_res = MutationManager::rename_symbol(
+        root,
+        Path::new("mod_a.ts"),
+        "parse",
+        "parsePayload",
+        VerifyMode::Fast,
+        &mut graph,
+        Some(&mut pkg_indexer),
+    )
+    .expect("rename_symbol must succeed");
+
+    assert!(rename_res.success);
+    // mod_a.ts and caller_a.ts should be modified
+    assert!(rename_res.files_modified.contains(&"mod_a.ts".to_string()));
+    assert!(
+        rename_res
+            .files_modified
+            .contains(&"caller_a.ts".to_string())
+    );
+    // mod_b.ts MUST NOT be modified!
+    assert!(
+        !rename_res.files_modified.contains(&"mod_b.ts".to_string()),
+        "Unrelated mod_b.ts must NOT be renamed!"
+    );
+
+    let content_b = fs::read_to_string(root.join("mod_b.ts")).unwrap();
+    assert!(
+        content_b.contains("function parse("),
+        "mod_b's parse must remain untouched"
+    );
+    assert!(
+        !content_b.contains("parsePayload"),
+        "mod_b must not contain renamed symbol"
+    );
+
+    // Warnings should document the unlinked file
+    assert!(
+        rename_res.warnings.iter().any(|w| w.contains("mod_b.ts")),
+        "Expected advisory warning for skipped unlinked mod_b.ts"
+    );
+}
+
+#[test]
+fn test_verification_report_tier_and_ast_notice_disclosure() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join("tsconfig.json"),
+        r#"{"compilerOptions": {"target": "ES2020"}}"#,
+    )
+    .unwrap();
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        src_dir.join("index.ts"),
+        "export const greeting: string = 'hello';",
+    )
+    .unwrap();
+
+    let mut graph = VectorGraph::new();
+    graph.sync_workspace(root);
+
+    let report = Verifier::verify_workspace_with_options(root, &graph, None, false);
+    assert!(report.success);
+    assert_eq!(
+        report.verification_tier.as_deref(),
+        Some("ast_syntax_and_import_only")
+    );
+    assert!(report.scope_notice.is_some());
+    let notice = report.scope_notice.unwrap();
+    assert!(
+        notice.contains("TypeScript compiler (tsc) was unavailable")
+            && notice.contains("Type checking, overload resolution"),
+        "Scope notice must honestly disclose AST-only verification: {}",
+        notice
     );
 }
