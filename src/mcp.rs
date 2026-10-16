@@ -491,6 +491,26 @@ fn handle_rpc_method(
                                     "max_tokens": {
                                         "type": "integer",
                                         "description": "Maximum token budget (default: 1200)"
+                                    },
+                                    "enable_graph_expansion": {
+                                        "type": "boolean",
+                                        "description": "Enable Personalized PageRank dependency expansion (default: true)"
+                                    },
+                                    "enable_test_discovery": {
+                                        "type": "boolean",
+                                        "description": "Enable companion test discovery (default: true)"
+                                    },
+                                    "ranking_mode": {
+                                        "type": "string",
+                                        "description": "Retrieval ranking mode (e.g. bm25f, lexical, graph)"
+                                    },
+                                    "max_hot_slices": {
+                                        "type": "integer",
+                                        "description": "Max hot code slices to inline (default: 5)"
+                                    },
+                                    "max_files": {
+                                        "type": "integer",
+                                        "description": "Max relevant files to report (default: 10)"
                                     }
                                 },
                                 "required": ["task"]
@@ -1573,14 +1593,49 @@ pub fn execute_tool(
                 .map(|m| m as usize)
                 .unwrap_or(1200);
 
+            let enable_graph_expansion = args
+                .get("enable_graph_expansion")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let enable_test_discovery = args
+                .get("enable_test_discovery")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let max_hot_slices = args
+                .get("max_hot_slices")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(5);
+
+            let max_files = args
+                .get("max_files")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(10);
+
+            let ranking_mode = args
+                .get("ranking_mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
             let target_buf = target_path_str.and_then(|p| resolve_safe_path(root, p).ok());
 
-            let packet = crate::context_compiler::ContextCompiler::compile_task_context(
-                g,
-                task,
-                target_buf.as_deref(),
+            let options = crate::context_compiler::TaskContextOptions {
                 max_tokens,
-            );
+                target_path: target_buf,
+                enable_graph_expansion,
+                enable_test_discovery,
+                max_hot_slices,
+                max_files,
+                ranking_mode,
+            };
+
+            let packet =
+                crate::context_compiler::ContextCompiler::compile_task_context_with_options(
+                    g, task, &options,
+                );
             serde_json::to_string(&packet).unwrap_or_default()
         }
         "verify_project" => {

@@ -36,6 +36,24 @@ impl std::fmt::Display for SymbolKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ParserProvenance {
+    #[default]
+    TreeSitter,
+    UniversalParser,
+    Heuristic,
+}
+
+impl std::fmt::Display for ParserProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParserProvenance::TreeSitter => write!(f, "tree_sitter"),
+            ParserProvenance::UniversalParser => write!(f, "universal_parser"),
+            ParserProvenance::Heuristic => write!(f, "heuristic"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
@@ -44,6 +62,27 @@ pub struct Symbol {
     pub end_line: usize,   // 1-indexed
     pub signature: String,
     pub doc_comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolBlock {
+    pub file_path: PathBuf,
+    pub language: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: SymbolKind,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_symbol: Option<String>,
+    pub normalized_tokens: Vec<String>,
+    pub provenance: ParserProvenance,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
