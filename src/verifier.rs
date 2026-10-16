@@ -61,9 +61,24 @@ impl DiagnosticItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationComparison {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub new_errors: Vec<DiagnosticItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_errors: Vec<DiagnosticItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persistent_errors: Vec<DiagnosticItem>,
+}
+
+impl VerificationComparison {
+    pub fn is_empty(&self) -> bool {
+        self.new_errors.is_empty()
+            && self.resolved_errors.is_empty()
+            && self.persistent_errors.is_empty()
+    }
+}
+
+fn is_empty_comparison(c: &Option<VerificationComparison>) -> bool {
+    c.as_ref().is_none_or(|comp| comp.is_empty())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +87,9 @@ pub struct VerificationReport {
     pub project_type: String,
     pub error_count: usize,
     pub warning_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<DiagnosticItem>,
+    #[serde(default, skip_serializing_if = "is_empty_comparison")]
     pub comparison: Option<VerificationComparison>,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -291,15 +308,17 @@ pub fn detect_nested_project_root(root: &Path) -> Option<PathBuf> {
         }
 
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        // Ignore hidden, VCS, cache, and build artifact folders
+        // Ignore hidden, VCS, cache, doc, standard source, and build artifact folders
         if name.starts_with('.')
-            || name == "node_modules"
-            || name == "target"
-            || name == "dist"
-            || name == "build"
+            || crate::walker::is_universal_ignored_dir(name)
+            || crate::walker::NON_CORE_DOC_DIRS.contains(&name)
+            || name == "src"
+            || name == "source"
+            || name == "lib"
+            || name == "tests"
+            || name == "test"
             || name == "bin"
             || name == "obj"
-            || name == "__pycache__"
         {
             continue;
         }
@@ -975,12 +994,20 @@ impl Verifier {
         let error_count = precheck_diags.len();
         let success = error_count == 0;
         let message = if success {
-            "Fast-path AST pre-check passed (0 syntax or unresolvable import errors in <5ms)."
-                .to_string()
+            "Fast-path AST pre-check passed (0 errors in <5ms).".to_string()
         } else {
             format!(
                 "Fast-path AST pre-check detected {} syntax/import error(s).",
                 error_count
+            )
+        };
+
+        let compiler_skipped_reason = if success {
+            None
+        } else {
+            Some(
+                "Fast-path AST verification executed (<5ms); external compiler subprocess bypassed"
+                    .to_string(),
             )
         };
 
@@ -992,10 +1019,7 @@ impl Verifier {
             diagnostics: precheck_diags,
             comparison: Some(comparison),
             message,
-            compiler_skipped_reason: Some(
-                "Fast-path AST verification executed (<5ms); external compiler subprocess bypassed"
-                    .to_string(),
-            ),
+            compiler_skipped_reason,
         }
     }
 
@@ -1011,6 +1035,70 @@ impl Verifier {
             && let Some(nested) = detect_nested_project_root(root)
         {
             target_root = nested;
+        }
+
+        // Fast-Path: Incremental verification on large repositories (>30 source files)
+        if !force_compiler && graph.files.len() > 30 && !graph.session_modified_files.is_empty() {
+            let mut allowed = HashSet::new();
+            for f in &graph.session_modified_files {
+                allowed.insert(crate::graph::normalize_relative_path(f));
+                for dep in graph.get_downstream_dependents(f) {
+                    allowed.insert(crate::graph::normalize_relative_path(&dep));
+                }
+            }
+
+            let precheck_diags = Self::instant_ast_precheck_filtered(
+                &target_root,
+                &graph.files,
+                &graph.path_aliases,
+                Some(&allowed),
+            );
+
+            if !precheck_diags.is_empty() {
+                let mut comparison =
+                    Self::compare_diagnostics(graph.last_verification.as_deref(), &precheck_diags);
+                Self::enrich_persistent_diagnostics(
+                    &mut comparison.persistent_errors,
+                    graph,
+                    pkg_indexer.as_deref_mut(),
+                    &target_root,
+                );
+
+                let error_count = precheck_diags.len();
+                return VerificationReport {
+                    success: false,
+                    project_type: ProjectType::detect(&target_root).as_str().to_string(),
+                    error_count,
+                    warning_count: 0,
+                    diagnostics: precheck_diags,
+                    comparison: Some(comparison),
+                    message: format!(
+                        "Fast-path incremental AST pre-check detected {} syntax/import error(s) in <5ms.",
+                        error_count
+                    ),
+                    compiler_skipped_reason: Some(
+                        "Pre-check detected AST syntax/import errors; external compiler subprocess bypassed"
+                            .to_string(),
+                    ),
+                };
+            } else {
+                return VerificationReport {
+                    success: true,
+                    project_type: ProjectType::detect(&target_root).as_str().to_string(),
+                    error_count: 0,
+                    warning_count: 0,
+                    diagnostics: vec![],
+                    comparison: None,
+                    message: format!(
+                        "Incremental AST verification passed (scoped to {} modified file(s) and dependents in large repository).",
+                        graph.session_modified_files.len()
+                    ),
+                    compiler_skipped_reason: Some(
+                        "Large repository incremental verification: modified files and direct dependents verified cleanly in <5ms."
+                            .to_string(),
+                    ),
+                };
+            }
         }
 
         // Fast-Path: In-memory AST precheck (<5ms)

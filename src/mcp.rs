@@ -259,13 +259,13 @@ fn handle_rpc_method(
                     "tools": [
                         {
                             "name": "get_file_skeleton",
-                            "description": "PREFERRED over reading entire files. Retrieves the outline of a file (imports, classes, functions, and method signatures with line numbers) without bodies. Use this first when exploring a file or understanding module structure.",
+                            "description": "Get file outline with symbols, signatures, and line numbers without bodies.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "path": {
                                         "type": "string",
-                                        "description": "Relative path to the file in the workspace"
+                                        "description": "Workspace-relative file path"
                                     }
                                 },
                                 "required": ["path"]
@@ -273,21 +273,21 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "find_symbol",
-                            "description": "PREFERRED over grep for symbol declarations. Finds exact definitions of a function, class, or struct. For common names ('run', 'new'), pass 'file' or 'limit' to avoid broad lists.",
+                            "description": "Find exact definition locations of functions, structs, or classes.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "name": {
                                         "type": "string",
-                                        "description": "Exact or partial symbol name (e.g., 'TimelineView', 'InsertClipCommand')"
+                                        "description": "Exact or partial symbol name"
                                     },
                                     "file": {
                                         "type": "string",
-                                        "description": "Optional file path hint to narrow down search"
+                                        "description": "Optional file path to narrow search"
                                     },
                                     "limit": {
                                         "type": "integer",
-                                        "description": "Optional maximum results to return (default: 15)"
+                                        "description": "Maximum results to return (default: 15)"
                                     }
                                 },
                                 "required": ["name"]
@@ -295,21 +295,21 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "find_references",
-                            "description": "Finds all occurrences, usages, and references to a symbol across the codebase. Set code_only=true to filter out documentation, markdown, and JSON schemas.",
+                            "description": "Find all usages and references of a symbol across workspace.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "symbol": {
                                         "type": "string",
-                                        "description": "The function, class, or symbol name to look up"
+                                        "description": "Symbol name to look up"
                                     },
                                     "code_only": {
                                         "type": "boolean",
-                                        "description": "Optional: If true, only returns references in code files (.rs, .ts, .py, etc.), ignoring docs and schemas."
+                                        "description": "If true, search only code files, ignoring docs"
                                     },
                                     "limit": {
                                         "type": "integer",
-                                        "description": "Optional: Maximum references to return (default 60)"
+                                        "description": "Maximum references to return (default: 60)"
                                     }
                                 },
                                 "required": ["symbol"]
@@ -317,17 +317,17 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "get_callers",
-                            "description": "PREFERRED over ripgrep for finding callers. Returns distinct caller functions and methods across the codebase, grouped by enclosing function with call counts and line ranges.",
+                            "description": "Find distinct caller functions grouped by enclosing symbol.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "symbol": {
                                         "type": "string",
-                                        "description": "The function, class, or method name to find callers for"
+                                        "description": "Function or method name to find callers for"
                                     },
                                     "limit": {
                                         "type": "integer",
-                                        "description": "Optional: Maximum distinct callers to return (default 25)"
+                                        "description": "Maximum distinct callers to return (default: 25)"
                                     }
                                 },
                                 "required": ["symbol"]
@@ -335,13 +335,13 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "get_lines",
-                            "description": "PREFERRED over reading entire files with cat/head. Retrieves an exact slice of lines from a file (1-based, inclusive) in compact plain text.",
+                            "description": "Get exact slice of lines from a file.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "path": {
                                         "type": "string",
-                                        "description": "Relative path to the file"
+                                        "description": "Workspace-relative file path"
                                     },
                                     "start": {
                                         "type": "integer",
@@ -357,7 +357,7 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "search",
-                            "description": "Semantic code search across the project using token and vector similarity. Best for conceptual or keyword queries when symbol names are unknown.",
+                            "description": "Semantic token and vector code search across project.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -367,7 +367,7 @@ fn handle_rpc_method(
                                     },
                                     "limit": {
                                         "type": "integer",
-                                        "description": "Maximum number of results to return (default: 3)"
+                                        "description": "Maximum results to return (default: 3)"
                                     }
                                 },
                                 "required": ["query"]
@@ -375,21 +375,21 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "get_symbol_body",
-                            "description": "PREFERRED over reading full files. Retrieves ONLY the exact implementation body of a specific function, method, or class with exact line numbers, saving context window tokens.",
+                            "description": "Get full implementation body of a specific function or class.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "name": {
                                         "type": "string",
-                                        "description": "Symbol name (e.g., 'on_open_file_clicked', 'InsertClipCommand')"
+                                        "description": "Symbol name to retrieve body for"
                                     },
                                     "file": {
                                         "type": "string",
-                                        "description": "Optional file path hint to disambiguate identical symbol names"
+                                        "description": "Optional file path hint"
                                     },
                                     "max_lines": {
                                         "type": "integer",
-                                        "description": "Optional maximum lines to return before truncation (default: 400)"
+                                        "description": "Maximum lines to return (default: 400)"
                                     }
                                 },
                                 "required": ["name"]
@@ -397,13 +397,13 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "get_impact_radius",
-                            "description": "Comprehensive blast-radius analysis. Returns callers (capped at 10, with total_callers count) and callees (what functions it calls) in one compact response (~300-500 tokens). Use before refactoring, editing, or renaming any symbol.",
+                            "description": "Blast-radius analysis returning callers and callees for a symbol.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "symbol": {
                                         "type": "string",
-                                        "description": "Symbol, function, or class name to analyze impact for"
+                                        "description": "Symbol or function name to analyze"
                                     },
                                     "file": {
                                         "type": "string",
@@ -415,42 +415,42 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "get_tree",
-                            "description": "Returns a compact directory overview with symbol counts. In large repositories or monorepos, specify 'path' or 'max_depth' to inspect specific subdirectories and avoid context bloat.",
+                            "description": "Compact directory overview with symbol counts. Pass path to narrow.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "path": {
                                         "type": "string",
-                                        "description": "Optional relative subdirectory path to inspect (e.g., 'crates/tauri' or 'src')"
+                                        "description": "Optional relative subdirectory path to inspect"
                                     },
                                     "max_depth": {
                                         "type": "integer",
-                                        "description": "Optional maximum depth of folder hierarchy (default: 2)"
+                                        "description": "Hierarchy traversal depth limit (default: 2)"
                                     },
                                     "limit": {
                                         "type": "integer",
-                                        "description": "Optional maximum files to return (default: 50)"
+                                        "description": "Maximum file entries to return (default: 25)"
                                     }
                                 }
                             }
                         },
                         {
                             "name": "scaffold_template",
-                            "description": "Scaffold a verified, minimal project starter in an empty destination directory. Guarantees zero overwrites and immediately synchronizes the workspace graph. Supported templates: 'rust-cli'.",
+                            "description": "Scaffold minimal verified project starter in empty destination folder.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "template": {
                                         "type": "string",
-                                        "description": "Template name to scaffold. Supported: 'rust-cli'"
+                                        "description": "Starter template name (e.g. 'rust-cli')"
                                     },
                                     "project_name": {
                                         "type": "string",
-                                        "description": "Name of the new project (must be valid identifier)"
+                                        "description": "New project identifier"
                                     },
                                     "destination": {
                                         "type": "string",
-                                        "description": "Optional relative destination directory path (defaults to current workspace root)"
+                                        "description": "Optional destination directory (defaults to workspace root)"
                                     }
                                 },
                                 "required": ["template", "project_name"]
@@ -458,21 +458,21 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "prepare_task_context",
-                            "description": "Compile a task-specific, token-bounded context packet containing relevant interfaces, types, errors, imports, and provenance. Replaces exploratory multi-tool loops with a single ranked, budgeted context delivery.",
+                            "description": "Compile token-budgeted packet of relevant types, interfaces, and architecture.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "task": {
                                         "type": "string",
-                                        "description": "Description of the module or feature to implement, e.g. 'implement postgres user repository with error handling'"
+                                        "description": "Task description to compile context for"
                                     },
                                     "target_path": {
                                         "type": "string",
-                                        "description": "Optional relative file path being written or edited"
+                                        "description": "Optional file path being edited"
                                     },
                                     "max_tokens": {
                                         "type": "integer",
-                                        "description": "Optional token ceiling for the context packet (default: 1200)"
+                                        "description": "Maximum token budget (default: 1200)"
                                     }
                                 },
                                 "required": ["task"]
@@ -480,13 +480,13 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "set_workspace",
-                            "description": "Dynamically switch Layer's active workspace root to a different project directory. Clears the previous index and immediately indexes the new project. Use this whenever switching repositories or when working in multi-repo workflows.",
+                            "description": "Switch active workspace root and re-index project graph immediately.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "path": {
                                         "type": "string",
-                                        "description": "Relative or absolute path to the target project directory (e.g. '.' or '/path/to/project')"
+                                        "description": "Path to new workspace directory"
                                     }
                                 },
                                 "required": ["path"]
@@ -494,65 +494,65 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "verify_project",
-                            "description": "PREFERRED over terminal cargo check or tsc. Runs native compiler verification with structured compact diagnostics and error lifecycle tracking (new, persistent, resolved). Pass force_compiler: true to bypass AST pre-check short-circuiting.",
+                            "description": "Fast AST precheck and native compiler verification with lifecycle tracking.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "force_compiler": {
                                         "type": "boolean",
-                                        "description": "Optional: Force running full compiler subprocess (tsc/cargo) even if fast AST pre-check passes or fails (default: false)"
+                                        "description": "Run compiler even if AST check passes (default: false)"
                                     }
                                 }
                             }
                         },
                         {
                             "name": "bootstrap_project",
-                            "description": "Bootstrap a new project using standard zero-overhead pure Rust generators (Next.js, Vite React-TS, Cargo binary/lib, Python, Go, C++, Swift, Kotlin, C#, Java). Guarantees zero overwrites, instant sub-5ms file generation by default, auto-switches workspace root, and immediately indexes the project. Supported presets: 'nextjs', 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'.",
+                            "description": "Instant zero-overhead scaffolding for frontend, backend, or systems projects.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "preset": {
                                         "type": "string",
-                                        "description": "Ecosystem preset: 'nextjs', 'react-ts', 'rust-bin', 'rust-lib', 'python', 'go', 'cpp', 'swift', 'kotlin', 'csharp', 'java'"
+                                        "description": "Preset name (nextjs, react-ts, rust-bin, python, go, etc.)"
                                     },
                                     "project_name": {
                                         "type": "string",
-                                        "description": "Project name (valid identifier)"
+                                        "description": "Project identifier name"
                                     },
                                     "destination": {
                                         "type": "string",
-                                        "description": "Optional destination parent directory (defaults to current workspace root)"
+                                        "description": "Optional destination folder (defaults to workspace root)"
                                     },
                                     "packages": {
                                         "type": "array",
                                         "items": { "type": "string" },
-                                        "description": "Optional initial packages to declare (e.g. ['three', '@react-three/fiber', '@react-three/drei'])"
+                                        "description": "Optional initial package dependencies"
                                     },
                                     "install_dependencies": {
                                         "type": "boolean",
-                                        "description": "Optional: whether to attempt running package managers (npm install, cargo add) immediately. Defaults to false for instant zero-subprocess scaffolding."
+                                        "description": "Whether to run package manager immediately (default: false)"
                                     }
-                                }
-                            },
-                            "required": ["preset", "project_name"]
+                                },
+                                "required": ["preset", "project_name"]
+                            }
                         },
                         {
                             "name": "inspect_package_api",
-                            "description": "CRITICAL: Call this BEFORE writing code that imports external packages (e.g. Three.js, React Three Fiber, Lucide, Tailwind, Axum). Extracts exact TypeScript declarations (.d.ts) or Rust signatures directly from node_modules or Cargo dependencies to eliminate API hallucinations.",
+                            "description": "Extract verified type definitions and signatures from installed dependencies.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "package_name": {
                                         "type": "string",
-                                        "description": "Name of the dependency package (e.g., '@react-three/fiber', 'three', 'zod')"
+                                        "description": "Installed package or crate dependency name"
                                     },
                                     "symbol_name": {
                                         "type": "string",
-                                        "description": "Optional exact symbol name to extract declaration and doc comments for"
+                                        "description": "Optional exact symbol name to extract"
                                     },
                                     "query": {
                                         "type": "string",
-                                        "description": "Optional search term to filter exported package symbols"
+                                        "description": "Optional filter term for exported symbols"
                                     }
                                 },
                                 "required": ["package_name"]
@@ -560,30 +560,30 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "write_file",
-                            "description": "PREFERRED over native Write tool. Writes full file content with automatic pre-edit snapshotting, instant AST pre-check (<5ms), graph synchronization, and cascading circuit breaker. Supports verify_mode ('fast', 'full', 'none'). In multi-file refactoring, preserves valid interface edits and returns pending_downstream_updates checklist instead of rolling back.",
+                            "description": "Write file with snapshotting, sub-5ms AST check, and circuit breaker.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "path": {
                                         "type": "string",
-                                        "description": "Relative path to the file to create or overwrite"
+                                        "description": "Workspace-relative file path"
                                     },
                                     "content": {
                                         "type": "string",
-                                        "description": "Full file content to write"
+                                        "description": "Complete file content to write"
                                     },
                                     "verify_mode": {
                                         "type": "string",
                                         "enum": ["fast", "full", "none"],
-                                        "description": "Optional verification tier: 'fast' (<5ms in-memory AST syntax and local import check, zero subprocesses), 'full' (AST pre-check + compiler subprocess), 'none' (skip verification). Default is 'fast'."
+                                        "description": "Verification tier: 'fast', 'full', or 'none' (default: 'fast')"
                                     },
                                     "auto_verify": {
                                         "type": "boolean",
-                                        "description": "Optional: (Deprecated alias) false maps to verify_mode='none', true maps to 'fast'"
+                                        "description": "Deprecated: false maps to 'none', true to 'fast'"
                                     },
                                     "auto_rollback_on_cascade": {
                                         "type": "boolean",
-                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: false)"
+                                        "description": "Auto-revert if edit causes cascading errors (default: false)"
                                     }
                                 },
                                 "required": ["path", "content"]
@@ -591,17 +591,17 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "edit_file",
-                            "description": "PREFERRED over native Edit tool. Surgically replaces a target snippet of code. Features automatic snapshotting, sub-5ms AST pre-check, and rollback protection for broken syntax.",
+                            "description": "Surgically replace target snippet with AST precheck and snapshotting.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "path": {
                                         "type": "string",
-                                        "description": "Relative path to the file to edit"
+                                        "description": "Workspace-relative file path"
                                     },
                                     "target": {
                                         "type": "string",
-                                        "description": "Exact text snippet to replace (must match uniquely)"
+                                        "description": "Exact unique snippet to replace"
                                     },
                                     "replacement": {
                                         "type": "string",
@@ -610,15 +610,15 @@ fn handle_rpc_method(
                                     "verify_mode": {
                                         "type": "string",
                                         "enum": ["fast", "full", "none"],
-                                        "description": "Optional verification tier: 'fast' (<5ms in-memory AST syntax and local import check, zero subprocesses), 'full' (AST pre-check + compiler subprocess), 'none' (skip verification). Default is 'fast'."
+                                        "description": "Verification tier: 'fast', 'full', or 'none' (default: 'fast')"
                                     },
                                     "auto_verify": {
                                         "type": "boolean",
-                                        "description": "Optional: (Deprecated alias) false maps to verify_mode='none', true maps to 'fast'"
+                                        "description": "Deprecated: false maps to 'none', true to 'fast'"
                                     },
                                     "auto_rollback_on_cascade": {
                                         "type": "boolean",
-                                        "description": "Optional: Whether to automatically revert if edit causes cascading compilation breakage (default: false)"
+                                        "description": "Auto-revert if edit causes cascading errors (default: false)"
                                     }
                                 },
                                 "required": ["path", "target", "replacement"]
@@ -626,7 +626,7 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "rollback_last_edit",
-                            "description": "Instantly reverts the most recent write or edit to its pre-mutation snapshot and synchronizes the workspace graph in 1 tool turn.",
+                            "description": "Revert most recent file write or edit from in-memory snapshot.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {}
@@ -634,17 +634,17 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "scaffold_module",
-                            "description": "PREFERRED for creating new modules or feature architectures. Declaratively scaffolds multiple TypeScript/Rust files with imports, interface declarations, and stubbed functions on Turn 1 with zero subprocess overhead and instant graph indexing.",
+                            "description": "Declaratively scaffold multiple files with types, imports, and stubs.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "module_name": {
                                         "type": "string",
-                                        "description": "Logical module or feature name (e.g. 'physics', 'auth')"
+                                        "description": "Logical module name"
                                     },
                                     "files": {
                                         "type": "array",
-                                        "description": "List of files to scaffold with their imports, types, and functions",
+                                        "description": "Array of file specs with paths, types, and functions",
                                         "items": {
                                             "type": "object",
                                             "properties": {
@@ -686,13 +686,13 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "rename_symbol",
-                            "description": "Atomically rename a function, struct, interface, class, or variable across its declaration file and all dependent files in a single turn. Replaces exact AST code identifier occurrences while preserving strings and comments, with automatic rollback protection on syntax errors.",
+                            "description": "Atomically rename code identifier across all declaring and dependent files.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "path": {
                                         "type": "string",
-                                        "description": "Relative path to file where the symbol is declared or used"
+                                        "description": "Relative path where symbol is declared or used"
                                     },
                                     "old_name": {
                                         "type": "string",
@@ -700,12 +700,12 @@ fn handle_rpc_method(
                                     },
                                     "new_name": {
                                         "type": "string",
-                                        "description": "New identifier name (valid identifier)"
+                                        "description": "New identifier name"
                                     },
                                     "verify_mode": {
                                         "type": "string",
                                         "enum": ["fast", "full", "none"],
-                                        "description": "Verification mode after rename: 'fast' (sub-15ms AST check), 'full' (compiler check), or 'none'. Defaults to 'fast'."
+                                        "description": "Verification tier after rename: 'fast', 'full', or 'none'"
                                     }
                                 },
                                 "required": ["path", "old_name", "new_name"]
@@ -713,48 +713,48 @@ fn handle_rpc_method(
                         },
                         {
                             "name": "verify_impacted_tests",
-                            "description": "Selectively discover and run only the test files impacted by modified code via VectorGraph dependency tracing and companion test patterns, skipping unaffected test suites to save tokens and time.",
+                            "description": "Run only test files impacted by modified code via graph tracing.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "changed_files": {
                                         "type": "array",
                                         "items": { "type": "string" },
-                                        "description": "Optional list of changed relative file paths. If omitted, uses the most recent mutation snapshot or all indexed files."
+                                        "description": "Optional list of changed relative file paths"
                                     }
                                 }
                             }
                         },
                         {
                             "name": "get_session_stats",
-                            "description": "Retrieve Layer v1.1 ROI and session telemetry statistics, including total tool calls, surgical AST reads, estimated tokens saved, LLM turns saved, and a terminal dashboard summary.",
+                            "description": "Retrieve session telemetry, tokens saved, and tool call metrics.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "reset": {
                                         "type": "boolean",
-                                        "description": "Optionally reset session statistics to zero."
+                                        "description": "Whether to reset session counters to zero"
                                     }
                                 }
                             }
                         },
                         {
                             "name": "init_harness",
-                            "description": "Initialize agent steering directives (AGENTS.md, CLAUDE.md, .cursorrules) for AI coding agents (Codex, Claude Code, Cursor, OpenCode, Windsurf) so they automatically prioritize Layer MCP tools.",
+                            "description": "Install AI agent steering directives for Layer MCP tool priority.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "harness": {
                                         "type": "string",
-                                        "description": "Target harness name: 'codex', 'claude', 'cursor', 'opencode', 'windsurf', or 'all'. Defaults to 'all'."
+                                        "description": "Target harness ('codex', 'claude', 'cursor', 'windsurf', or 'all')"
                                     },
                                     "dest": {
                                         "type": "string",
-                                        "description": "Optional directory path to initialize. Defaults to current workspace root."
+                                        "description": "Optional destination directory (defaults to workspace root)"
                                     },
                                     "global": {
                                         "type": "boolean",
-                                        "description": "Optionally verify and update global harness MCP configs (~/.codex/config.toml, etc.)."
+                                        "description": "Whether to configure global harness MCP settings"
                                     }
                                 }
                             }
@@ -1199,7 +1199,7 @@ pub fn execute_tool(
             "indexed_chunks": g.chunks.len(),
             "message": format!("Workspace successfully switched to '{}'. Indexed {} files.", canonical.display(), g.files.len())
         });
-        return serde_json::to_string_pretty(&res).unwrap_or_default();
+        return serde_json::to_string(&res).unwrap_or_default();
     }
 
     // Auto-detect project root if agent supplied an explicit absolute path pointing to a different project
@@ -1504,7 +1504,7 @@ pub fn execute_tool(
             };
 
             match crate::scaffold::scaffold_project(supported, project_name, &dest_path, g) {
-                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_else(|_| "{}".to_string()),
+                Ok(res) => serde_json::to_string(&res).unwrap_or_else(|_| "{}".to_string()),
                 Err(err) => format!("Error: {}", err),
             }
         }
@@ -1525,7 +1525,7 @@ pub fn execute_tool(
                 target_buf.as_deref(),
                 max_tokens,
             );
-            serde_json::to_string_pretty(&packet).unwrap_or_default()
+            serde_json::to_string(&packet).unwrap_or_default()
         }
         "verify_project" => {
             let force_compiler = args
@@ -1564,7 +1564,7 @@ pub fn execute_tool(
                 force_compiler,
             );
             g.last_verification = Some(report.diagnostics.clone());
-            serde_json::to_string_pretty(&report).unwrap_or_default()
+            serde_json::to_string(&report).unwrap_or_default()
         }
         "inspect_package_api" => {
             let pkg_name = args
@@ -1575,14 +1575,14 @@ pub fn execute_tool(
             let query = args.get("query").and_then(|q| q.as_str());
 
             match pkg_indexer.inspect_package(root, pkg_name, sym_name, query) {
-                Ok(summary) => serde_json::to_string_pretty(&summary).unwrap_or_default(),
+                Ok(summary) => serde_json::to_string(&summary).unwrap_or_default(),
                 Err(e) => {
                     let unindexed = serde_json::json!({
                         "status": "unindexed_offline",
                         "package": pkg_name,
                         "advisory": format!("Package types for '{}' are unindexed or offline. Proceed directly using Layer mutation tools. Detail: {}", pkg_name, e)
                     });
-                    serde_json::to_string_pretty(&unindexed).unwrap_or_default()
+                    serde_json::to_string(&unindexed).unwrap_or_default()
                 }
             }
         }
@@ -1611,7 +1611,7 @@ pub fn execute_tool(
                 g,
                 Some(pkg_indexer),
             ) {
-                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Ok(res) => serde_json::to_string(&res).unwrap_or_default(),
                 Err(e) => format!("Error: {}", e),
             }
         }
@@ -1645,13 +1645,13 @@ pub fn execute_tool(
                 g,
                 Some(pkg_indexer),
             ) {
-                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Ok(res) => serde_json::to_string(&res).unwrap_or_default(),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "rollback_last_edit" => {
             match crate::mutation::MutationManager::rollback_last_edit(root, g) {
-                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Ok(res) => serde_json::to_string(&res).unwrap_or_default(),
                 Err(e) => format!("Error: {}", e),
             }
         }
@@ -1663,7 +1663,7 @@ pub fn execute_tool(
                 };
 
             match crate::scaffold::scaffold_module(root, req, g) {
-                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Ok(res) => serde_json::to_string(&res).unwrap_or_default(),
                 Err(e) => format!("Error: {}", e),
             }
         }
@@ -1727,7 +1727,7 @@ pub fn execute_tool(
                             );
                         }
                     }
-                    serde_json::to_string_pretty(&res).unwrap_or_default()
+                    serde_json::to_string(&res).unwrap_or_default()
                 }
                 Err(e) => format!("Error: {}", e),
             }
@@ -1753,7 +1753,7 @@ pub fn execute_tool(
                 g,
                 Some(pkg_indexer),
             ) {
-                Ok(res) => serde_json::to_string_pretty(&res).unwrap_or_default(),
+                Ok(res) => serde_json::to_string(&res).unwrap_or_default(),
                 Err(e) => format!("Error: {}", e),
             }
         }
@@ -1793,7 +1793,7 @@ pub fn execute_tool(
 
             let res =
                 crate::verifier::Verifier::verify_impacted_tests(root, changed_files.as_deref(), g);
-            serde_json::to_string_pretty(&res).unwrap_or_default()
+            serde_json::to_string(&res).unwrap_or_default()
         }
         "get_session_stats" => {
             let reset = args.get("reset").and_then(|r| r.as_bool()).unwrap_or(false);
@@ -1817,7 +1817,7 @@ pub fn execute_tool(
                 "dashboard": dashboard,
                 "tool_breakdown": tracker.tool_breakdown,
             });
-            serde_json::to_string_pretty(&res).unwrap_or_default()
+            serde_json::to_string(&res).unwrap_or_default()
         }
         "init_harness" => {
             let harness_str = args
@@ -1844,7 +1844,7 @@ pub fn execute_tool(
                 harness_type,
                 check_global,
             );
-            serde_json::to_string_pretty(&res).unwrap_or_default()
+            serde_json::to_string(&res).unwrap_or_default()
         }
         _ => format!("Unknown tool: {}", tool_name),
     }
@@ -1941,7 +1941,9 @@ mod tests {
             Some(&switch_args),
             &mut pkg_indexer,
         );
-        assert!(switch_res.contains("\"success\": true"));
+        assert!(
+            switch_res.contains("\"success\":true") || switch_res.contains("\"success\": true")
+        );
         assert_eq!(current_root, canon_b);
         assert!(graph.files.contains_key(&PathBuf::from("b.rs")));
         assert!(!graph.files.contains_key(&PathBuf::from("main.rs")));

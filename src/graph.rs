@@ -44,6 +44,8 @@ pub struct VectorGraph {
     pub last_mutation_snapshot: Option<crate::mutation::MutationSnapshot>,
     /// Last multi-file mutation snapshot for atomic refactor rollback
     pub last_multi_file_snapshot: Option<Vec<crate::mutation::MutationSnapshot>>,
+    /// Files modified during the current session for incremental verification
+    pub session_modified_files: HashSet<PathBuf>,
 }
 
 impl Default for VectorGraph {
@@ -79,6 +81,7 @@ impl VectorGraph {
             path_aliases: default_path_aliases(),
             last_mutation_snapshot: None,
             last_multi_file_snapshot: None,
+            session_modified_files: HashSet::new(),
         }
     }
 
@@ -93,6 +96,12 @@ impl VectorGraph {
         self.path_aliases = default_path_aliases();
         self.last_mutation_snapshot = None;
         self.last_multi_file_snapshot = None;
+        self.session_modified_files.clear();
+    }
+
+    pub fn record_modified_file(&mut self, path: &Path) {
+        self.session_modified_files
+            .insert(normalize_relative_path(path));
     }
 
     /// Returns files that import `target_path` (incoming edges in dependency graph)
@@ -412,12 +421,26 @@ impl VectorGraph {
     /// Eliminates debouncer race conditions when an agent creates files and queries immediately.
     pub fn sync_workspace(&mut self, root: &Path) {
         self.load_tsconfig_aliases(root);
+        let skip_docs = crate::walker::has_primary_code_outside_docs(root);
         let scanner = CodebaseScanner::new(root);
         let walker = ignore::WalkBuilder::new(root)
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
+            .filter_entry(move |entry| {
+                let name = entry.file_name().to_string_lossy();
+                if crate::walker::is_universal_ignored_dir(&name) {
+                    return false;
+                }
+                if skip_docs
+                    && entry.file_type().is_some_and(|ft| ft.is_dir())
+                    && crate::walker::NON_CORE_DOC_DIRS.contains(&name.as_ref())
+                {
+                    return false;
+                }
+                true
+            })
             .build();
 
         let mut seen_paths = std::collections::HashSet::new();
@@ -437,7 +460,7 @@ impl VectorGraph {
             // Ignore common build and target directories
             let is_ignored = rel_path.components().any(|c| {
                 let name = c.as_os_str().to_string_lossy();
-                name == "build" || name == "target" || name == "node_modules"
+                crate::walker::is_universal_ignored_dir(&name)
             });
             if is_ignored {
                 continue;
@@ -471,7 +494,13 @@ impl VectorGraph {
         let to_remove: Vec<PathBuf> = self
             .files
             .keys()
-            .filter(|p| !seen_paths.contains(*p))
+            .filter(|p| {
+                if seen_paths.contains(*p) {
+                    false
+                } else {
+                    !root.join(p).exists()
+                }
+            })
             .cloned()
             .collect();
 
@@ -752,7 +781,7 @@ impl VectorGraph {
         }
 
         let max_d = max_depth.unwrap_or(2);
-        let max_items = limit.unwrap_or(50);
+        let max_items = limit.unwrap_or(25);
         let mut sorted_paths = self.list_files();
         sorted_paths.sort();
 
@@ -806,7 +835,7 @@ impl VectorGraph {
         let mut output = lines.join("\n");
         if total_matching > lines.len() {
             output.push_str(&format!(
-                "\n... [Showing {} of {} matching files across {} directories. Use 'path' parameter to inspect specific subdirectories]",
+                "\n... [Showing {} of {} matching files across {} directories. Pass 'path' for specific subdirectories]",
                 lines.len(),
                 total_matching,
                 directories_seen.len()

@@ -29,6 +29,10 @@ pub struct TaskContextBudget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskContextPacket {
     pub task: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relevant_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub architecture_overview: Vec<String>,
     pub interfaces: Vec<TaskContextItem>,
     pub types: Vec<TaskContextItem>,
     pub errors: Vec<TaskContextItem>,
@@ -196,6 +200,17 @@ impl ContextCompiler {
         let mut imports_set = HashSet::new();
         let mut relevant_files = HashSet::new();
 
+        let mut ordered_relevant_files: Vec<String> = Vec::new();
+        for c in &filtered_candidates {
+            let f = c.file_path.display().to_string();
+            if !ordered_relevant_files.contains(&f) {
+                ordered_relevant_files.push(f);
+            }
+            if ordered_relevant_files.len() >= 10 {
+                break;
+            }
+        }
+
         let mut estimated_tokens = 40; // baseline JSON structure tokens
         let mut is_truncated = false;
         let mut omitted_count = 0;
@@ -284,8 +299,23 @@ impl ContextCompiler {
             }
         }
 
+        let mut arch_dirs = HashSet::new();
+        for p in graph.files.keys() {
+            if let Some(parent) = p.parent() {
+                let parent_str = parent.display().to_string();
+                if !parent_str.is_empty() && parent_str != "." {
+                    arch_dirs.insert(parent_str);
+                }
+            }
+        }
+        let mut architecture_overview: Vec<String> = arch_dirs.into_iter().collect();
+        architecture_overview.sort();
+        architecture_overview.truncate(15);
+
         TaskContextPacket {
             task: task.to_string(),
+            relevant_files: ordered_relevant_files,
+            architecture_overview,
             interfaces,
             types,
             errors,

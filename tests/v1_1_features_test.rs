@@ -921,3 +921,208 @@ if __name__ == "__main__":
     );
     assert!(!root.join("src/strict_broken.ts").exists());
 }
+
+#[test]
+fn test_compact_json_responses_and_clean_edit_receipts() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+    let mut root_buf = root.to_path_buf();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    let clean_code = "def hello():\n    return 'world'\n";
+    let args = serde_json::json!({
+        "path": "app.py",
+        "content": clean_code,
+        "verify_mode": "fast"
+    });
+
+    let res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "write_file",
+        Some(&args),
+        &mut pkg_indexer,
+    );
+
+    // 1. Output must be compact single-line JSON without pretty indentation newlines
+    assert!(
+        !res_str.contains('\n'),
+        "MCP response should be compact single-line JSON without newlines"
+    );
+    assert!(
+        res_str.len() < 350,
+        "Clean edit receipt should be compact (<350 bytes), was {}",
+        res_str.len()
+    );
+
+    let res_json: serde_json::Value = serde_json::from_str(&res_str).unwrap();
+    assert_eq!(res_json["success"], true);
+
+    // 2. Empty arrays/objects should be omitted on clean edits
+    assert!(
+        res_json.get("circuit_breaker").is_none(),
+        "Empty circuit_breaker should be omitted"
+    );
+    assert!(
+        res_json.get("pending_downstream_updates").is_none(),
+        "Empty pending_downstream_updates should be omitted"
+    );
+    assert!(
+        res_json.get("missing_imports_to_create_next").is_none(),
+        "Empty missing_imports should be omitted"
+    );
+}
+
+#[test]
+fn test_context_aware_directory_filtering() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // Create primary code file in src/
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.py"), "def main(): pass\n").unwrap();
+
+    // Create non-core directories (docs_src, examples, benchmarks, site)
+    std::fs::create_dir_all(root.join("docs_src")).unwrap();
+    std::fs::write(root.join("docs_src/tutorial.py"), "def tutorial(): pass\n").unwrap();
+
+    std::fs::create_dir_all(root.join("examples")).unwrap();
+    std::fs::write(root.join("examples/demo.py"), "def demo(): pass\n").unwrap();
+
+    std::fs::create_dir_all(root.join(".venv")).unwrap();
+    std::fs::write(root.join(".venv/lib.py"), "def venv_lib(): pass\n").unwrap();
+
+    assert!(layer::walker::has_primary_code_outside_docs(root));
+
+    let mut graph = VectorGraph::new();
+    graph.sync_workspace(root);
+
+    // Primary code must be indexed
+    assert!(
+        graph
+            .files
+            .contains_key(&std::path::PathBuf::from("src/main.py"))
+    );
+
+    // Ignored / non-core directories must NOT be indexed
+    assert!(
+        !graph
+            .files
+            .contains_key(&std::path::PathBuf::from("docs_src/tutorial.py"))
+    );
+    assert!(
+        !graph
+            .files
+            .contains_key(&std::path::PathBuf::from("examples/demo.py"))
+    );
+    assert!(
+        !graph
+            .files
+            .contains_key(&std::path::PathBuf::from(".venv/lib.py"))
+    );
+
+    // When repository is documentation-only, docs/ IS indexed
+    let doc_dir = tempdir().unwrap();
+    let doc_root = doc_dir.path();
+    std::fs::create_dir_all(doc_root.join("docs")).unwrap();
+    std::fs::write(doc_root.join("docs/readme.md"), "# Documentation\n").unwrap();
+
+    assert!(!layer::walker::has_primary_code_outside_docs(doc_root));
+    let mut doc_graph = VectorGraph::new();
+    doc_graph.sync_workspace(doc_root);
+    assert!(
+        doc_graph
+            .files
+            .contains_key(&std::path::PathBuf::from("docs/readme.md"))
+    );
+}
+
+#[test]
+fn test_incremental_verification_on_large_repositories() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+    let mut root_buf = root.to_path_buf();
+    let mut pkg_indexer = PackageIndexer::new();
+
+    // Create 32 python files (>30 files threshold)
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for i in 0..32 {
+        let name = format!("src/module_{}.py", i);
+        std::fs::write(
+            root.join(&name),
+            format!("def func_{}(): return {}\n", i, i),
+        )
+        .unwrap();
+    }
+    graph.sync_workspace(root);
+    assert!(graph.files.len() >= 32);
+
+    // Modify 1 file via write_file
+    let edit_args = serde_json::json!({
+        "path": "src/module_0.py",
+        "content": "def func_0(): return 999\n",
+        "verify_mode": "fast"
+    });
+    let _ = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "write_file",
+        Some(&edit_args),
+        &mut pkg_indexer,
+    );
+
+    assert!(!graph.session_modified_files.is_empty());
+
+    // verify_project without force_compiler triggers incremental AST verification
+    let verify_args = serde_json::json!({});
+    let verify_res_str = layer::mcp::execute_tool(
+        &mut graph,
+        &mut root_buf,
+        "verify_project",
+        Some(&verify_args),
+        &mut pkg_indexer,
+    );
+
+    let verify_json: serde_json::Value = serde_json::from_str(&verify_res_str).unwrap();
+    assert_eq!(verify_json["success"], true);
+    assert_eq!(verify_json["error_count"], 0);
+    let msg = verify_json["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("Incremental AST verification passed"),
+        "Expected incremental verification message, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_hard_capped_output_sizes_and_task_context() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+
+    // Create 30 files
+    for i in 0..30 {
+        let name = format!("file_{}.rs", i);
+        std::fs::write(root.join(&name), format!("pub fn f_{}() {{}}\n", i)).unwrap();
+    }
+    graph.sync_workspace(root);
+
+    // get_tree compact formatting default limit should cap to 25
+    let tree_str = graph.format_compact_tree(None, None, None);
+    assert!(tree_str.contains("Showing 25 of 30 matching files"));
+
+    // prepare_task_context should cap relevant_files to top 10
+    let packet = layer::context_compiler::ContextCompiler::compile_task_context(
+        &graph,
+        "f_1 f_2 f_3 f_4 f_5 f_6 f_7 f_8 f_9 f_10 f_11 f_12 f_13",
+        None,
+        4000,
+    );
+    assert!(
+        packet.relevant_files.len() <= 10,
+        "relevant_files must be capped to top 10, got {}",
+        packet.relevant_files.len()
+    );
+}

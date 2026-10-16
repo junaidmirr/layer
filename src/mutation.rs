@@ -202,6 +202,8 @@ impl MutationManager {
 
         // 3. Immediately refresh file in VectorGraph
         graph.sync_workspace(root);
+        graph.refresh_path_if_modified(root, rel_path);
+        graph.record_modified_file(rel_path);
 
         let bytes_written = content.len();
         let line_count = content.lines().count();
@@ -657,6 +659,11 @@ impl MutationManager {
             files_modified.push(rel.to_string_lossy().to_string());
         }
 
+        // Record modified files in graph session
+        for f in &files_modified {
+            graph.record_modified_file(Path::new(f));
+        }
+
         // Sync workspace graph immediately
         graph.sync_workspace(root);
 
@@ -728,6 +735,7 @@ impl MutationManager {
                 } else if abs.exists() {
                     let _ = fs::remove_file(&abs);
                 }
+                graph.record_modified_file(&s.rel_path);
                 restored_files.push(s.rel_path.to_string_lossy().to_string());
             }
             graph.sync_workspace(root);
@@ -756,6 +764,7 @@ impl MutationManager {
                 fs::write(&abs_path, &old_content).map_err(|e| {
                     format!("Failed to restore file '{}': {}", abs_path.display(), e)
                 })?;
+                graph.record_modified_file(&snapshot.rel_path);
                 graph.sync_workspace(root);
                 Ok(RollbackResult {
                     success: true,

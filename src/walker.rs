@@ -4,6 +4,74 @@ use ignore::WalkBuilder;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub static UNIVERSAL_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".venv",
+    "venv",
+    "env",
+    "__pycache__",
+    ".tox",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    "coverage",
+    ".cache",
+    "vendor",
+    ".gemini",
+];
+
+pub static NON_CORE_DOC_DIRS: &[&str] = &["docs_src", "site", "examples", "benchmarks", "docs"];
+
+pub static PRIMARY_CODE_EXTENSIONS: &[&str] = &[
+    "rs", "py", "pyi", "ts", "tsx", "js", "jsx", "go", "c", "cpp", "cc", "h", "hpp", "swift", "kt",
+    "kts", "cs", "java",
+];
+
+pub fn is_universal_ignored_dir(name: &str) -> bool {
+    let clean = name.trim_matches(['/', '\\']);
+    let lower = clean.to_ascii_lowercase();
+    UNIVERSAL_IGNORED_DIRS.contains(&lower.as_str())
+}
+
+/// Checks if workspace contains primary code outside docs/tutorial directories.
+pub fn has_primary_code_outside_docs(root: &Path) -> bool {
+    let walker = WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            if is_universal_ignored_dir(&name) {
+                return false;
+            }
+            if entry.file_type().is_some_and(|ft| ft.is_dir())
+                && NON_CORE_DOC_DIRS.contains(&name.as_ref())
+            {
+                return false;
+            }
+            true
+        })
+        .build();
+
+    for entry in walker.filter_map(Result::ok) {
+        if entry.path().is_file()
+            && let Some(ext) = entry.path().extension().and_then(|e| e.to_str())
+        {
+            let lower = ext.to_ascii_lowercase();
+            if PRIMARY_CODE_EXTENSIONS.contains(&lower.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub struct CodebaseScanner {
     root_path: PathBuf,
 }
@@ -17,11 +85,25 @@ impl CodebaseScanner {
 
     /// Recursively scan codebase respecting .gitignore and binary file boundaries
     pub fn scan_all(&self) -> Vec<FileNode> {
+        let skip_docs = has_primary_code_outside_docs(&self.root_path);
         let walker = WalkBuilder::new(&self.root_path)
             .hidden(true) // skip hidden (.git, etc.)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
+            .filter_entry(move |entry| {
+                let name = entry.file_name().to_string_lossy();
+                if is_universal_ignored_dir(&name) {
+                    return false;
+                }
+                if skip_docs
+                    && entry.file_type().is_some_and(|ft| ft.is_dir())
+                    && NON_CORE_DOC_DIRS.contains(&name.as_ref())
+                {
+                    return false;
+                }
+                true
+            })
             .build();
 
         let paths: Vec<PathBuf> = walker
@@ -130,14 +212,10 @@ fn is_likely_binary_or_asset(path: &Path) -> bool {
         }
     }
 
-    // Ignore .git, target/, node_modules/ in path components
+    // Ignore build, VCS, and cache directories in path components
     for component in path.components() {
         let comp_str = component.as_os_str().to_string_lossy();
-        if comp_str == ".git"
-            || comp_str == "target"
-            || comp_str == "node_modules"
-            || comp_str == ".gemini"
-        {
+        if is_universal_ignored_dir(&comp_str) {
             return true;
         }
     }
