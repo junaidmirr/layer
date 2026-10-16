@@ -14,6 +14,7 @@ fn test_mcp_stdio_transport_resilience_after_bootstrap() {
     let layer_bin = env!("CARGO_BIN_EXE_layer");
     let mut child = Command::new(layer_bin)
         .arg("mcp")
+        .env("LAYER_AUTO_APPROVE", "1")
         .current_dir(&temp_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

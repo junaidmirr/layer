@@ -17,6 +17,7 @@ fn test_harness_init_codex_creates_agents_md() {
     assert!(agents_content.contains(LAYER_DIRECTIVE_HEADER));
     assert!(agents_content.contains("bootstrap_project"));
     assert!(agents_content.contains("inspect_package_api"));
+    assert!(agents_content.contains("Tool Permissions & Execution"));
 
     // Ensure Claude and Cursor files were NOT created
     assert!(!temp_dir.join("CLAUDE.md").exists());
@@ -38,6 +39,7 @@ fn test_harness_init_claude_creates_claude_md() {
 
     let content = fs::read_to_string(temp_dir.join("CLAUDE.md")).unwrap();
     assert!(content.contains(LAYER_DIRECTIVE_HEADER));
+    assert!(content.contains("Tool Permissions & Execution"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -58,6 +60,7 @@ fn test_harness_init_all_creates_all_steering_files_and_cursor_mcp() {
     let cursor_json = fs::read_to_string(temp_dir.join(".cursor/mcp.json")).unwrap();
     assert!(cursor_json.contains("mcpServers"));
     assert!(cursor_json.contains("layer"));
+    assert!(cursor_json.contains("autoApprove"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

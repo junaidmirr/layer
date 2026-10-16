@@ -561,6 +561,7 @@ dependencies = [
  "clap",
  "colored",
  "ignore",
+ "libc",
  "notify",
  "notify-debouncer-mini",
  "petgraph",

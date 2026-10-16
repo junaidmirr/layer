@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod models;
 pub mod mutation;
 pub mod package_indexer;
+pub mod permission;
 pub mod scaffold;
 pub mod scanner;
 pub mod telemetry;

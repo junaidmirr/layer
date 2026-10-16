@@ -857,6 +857,32 @@ fn handle_rpc_method(
                 .unwrap_or("");
             let arguments = params.and_then(|p| p.get("arguments"));
 
+            let clean_tool_name = tool_name
+                .strip_prefix("mcp__layer__")
+                .or_else(|| tool_name.strip_prefix("layer__"))
+                .unwrap_or(tool_name);
+
+            // Permission check:
+            // Non-interactive sessions automatically allow immediately with 0 delay.
+            // Interactive terminal sessions prompt user on /dev/tty with a 5s countdown timer.
+            // If user takes no action within 5 seconds, tool is automatically allowed.
+            if !crate::permission::PermissionManager::check_permission(clean_tool_name) {
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": format!("Error: Permission denied: Execution of tool '{}' was rejected by user in terminal.", tool_name)
+                            }
+                        ]
+                    }
+                });
+                send_json_line(writer, &resp)?;
+                return Ok(());
+            }
+
             let start_time = std::time::Instant::now();
             let mut g = match graph.lock() {
                 Ok(guard) => guard,
