@@ -290,13 +290,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let graph_bg = Arc::clone(&graph_arc);
         let root_bg = root.clone();
         std::thread::spawn(move || {
+            let mut local_graph = VectorGraph::new();
+            local_graph.load_tsconfig_aliases(&root_bg);
             let scanner = CodebaseScanner::new(&root_bg);
             let file_nodes = scanner.scan_all();
+            for node in file_nodes {
+                local_graph.upsert_file_batch(node);
+            }
+            local_graph.rebuild_all_edges();
             if let Ok(mut g) = graph_bg.lock() {
-                for node in file_nodes {
-                    g.upsert_file_batch(node);
+                for mod_file in &g.session_modified_files {
+                    local_graph.record_modified_file(mod_file);
                 }
-                g.rebuild_all_edges();
+                *g = local_graph;
             }
         });
     } else {

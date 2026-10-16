@@ -213,14 +213,19 @@ fn handle_rpc_method(
                         let graph_clone = Arc::clone(graph);
                         let root_clone = new_root.clone();
                         std::thread::spawn(move || {
+                            let mut local_graph = VectorGraph::new();
+                            local_graph.load_tsconfig_aliases(&root_clone);
                             let scanner = crate::walker::CodebaseScanner::new(&root_clone);
                             let file_nodes = scanner.scan_all();
+                            for node in file_nodes {
+                                local_graph.upsert_file_batch(node);
+                            }
+                            local_graph.rebuild_all_edges();
                             if let Ok(mut g) = graph_clone.lock() {
-                                g.clear();
-                                for node in file_nodes {
-                                    g.upsert_file_batch(node);
+                                for mod_file in &g.session_modified_files {
+                                    local_graph.record_modified_file(mod_file);
                                 }
-                                g.rebuild_all_edges();
+                                *g = local_graph;
                             }
                         });
                     }
@@ -235,14 +240,19 @@ fn handle_rpc_method(
                         let graph_clone = Arc::clone(graph);
                         let root_clone = new_root.clone();
                         std::thread::spawn(move || {
+                            let mut local_graph = VectorGraph::new();
+                            local_graph.load_tsconfig_aliases(&root_clone);
                             let scanner = crate::walker::CodebaseScanner::new(&root_clone);
                             let file_nodes = scanner.scan_all();
+                            for node in file_nodes {
+                                local_graph.upsert_file_batch(node);
+                            }
+                            local_graph.rebuild_all_edges();
                             if let Ok(mut g) = graph_clone.lock() {
-                                g.clear();
-                                for node in file_nodes {
-                                    g.upsert_file_batch(node);
+                                for mod_file in &g.session_modified_files {
+                                    local_graph.record_modified_file(mod_file);
                                 }
-                                g.rebuild_all_edges();
+                                *g = local_graph;
                             }
                         });
                     }
@@ -852,6 +862,41 @@ fn handle_rpc_method(
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
+
+            if g.files.is_empty()
+                && tool_name != "init_harness"
+                && tool_name != "get_session_stats"
+                && tool_name != "set_workspace"
+            {
+                let mut seed_hints = Vec::new();
+                if let Some(args) = arguments {
+                    for key in &[
+                        "query",
+                        "task_description",
+                        "name",
+                        "path",
+                        "symbol",
+                        "file",
+                        "target",
+                    ] {
+                        if let Some(val) = args.get(key).and_then(|v| v.as_str()) {
+                            seed_hints.push(val);
+                        }
+                    }
+                }
+                let seed_nodes = crate::walker::fast_seed_scan(
+                    root,
+                    &seed_hints,
+                    400,
+                    std::time::Duration::from_millis(250),
+                );
+                if !seed_nodes.is_empty() {
+                    for node in seed_nodes {
+                        g.upsert_file_batch(node);
+                    }
+                    g.rebuild_all_edges();
+                }
+            }
 
             let query_key = format!(
                 "{}:{}",

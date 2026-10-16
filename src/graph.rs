@@ -46,6 +46,14 @@ pub struct VectorGraph {
     pub last_multi_file_snapshot: Option<Vec<crate::mutation::MutationSnapshot>>,
     /// Files modified during the current session for incremental verification
     pub session_modified_files: HashSet<PathBuf>,
+    /// O(1) map of lowercase file stem (e.g. "storageproxy") to matching workspace PathBufs
+    pub stem_index: HashMap<String, Vec<PathBuf>>,
+    /// O(1) map of normalized path suffixes (e.g. "StorageProxy.java", "service/StorageProxy.java") to PathBufs
+    pub suffix_index: HashMap<String, Vec<PathBuf>>,
+    /// O(1) map of core stem for companion tests (e.g. "storageproxy" -> StorageProxyTest.java)
+    pub test_by_stem: HashMap<String, Vec<PathBuf>>,
+    /// O(1) map of parent directory names (e.g. "models" -> [Models/BodyState.cs]) to PathBufs
+    pub dir_index: HashMap<String, Vec<PathBuf>>,
 }
 
 impl Default for VectorGraph {
@@ -82,6 +90,10 @@ impl VectorGraph {
             last_mutation_snapshot: None,
             last_multi_file_snapshot: None,
             session_modified_files: HashSet::new(),
+            stem_index: HashMap::new(),
+            suffix_index: HashMap::new(),
+            test_by_stem: HashMap::new(),
+            dir_index: HashMap::new(),
         }
     }
 
@@ -97,6 +109,10 @@ impl VectorGraph {
         self.last_mutation_snapshot = None;
         self.last_multi_file_snapshot = None;
         self.session_modified_files.clear();
+        self.stem_index.clear();
+        self.suffix_index.clear();
+        self.test_by_stem.clear();
+        self.dir_index.clear();
     }
 
     pub fn record_modified_file(&mut self, path: &Path) {
@@ -118,6 +134,134 @@ impl VectorGraph {
             }
         }
         dependents
+    }
+
+    /// Returns files imported by `source_path` (outgoing edges in dependency graph)
+    pub fn get_dependencies(&self, source_path: &Path) -> Vec<PathBuf> {
+        let mut deps = Vec::new();
+        let source_buf = normalize_relative_path(source_path);
+        if let Some(&source_idx) = self.node_indices.get(&source_buf) {
+            for edge in self
+                .graph
+                .edges_directed(source_idx, petgraph::Direction::Outgoing)
+            {
+                let target_idx = edge.target();
+                deps.push(self.graph[target_idx].clone());
+            }
+        }
+        deps
+    }
+
+    /// Strips common test prefixes and suffixes from a file stem to find its core companion stem
+    pub fn extract_core_test_stem(stem: &str) -> String {
+        let lower = stem.to_lowercase();
+        let s = lower.strip_prefix("test_").unwrap_or(&lower);
+        let s = s.strip_prefix("test").unwrap_or(s);
+        let s = s.strip_suffix("_test").unwrap_or(s);
+        let s = s.strip_suffix("testcase").unwrap_or(s);
+        let s = s.strip_suffix("tests").unwrap_or(s);
+        let s = s.strip_suffix("test").unwrap_or(s);
+        let s = s.strip_suffix("_spec").unwrap_or(s);
+        let s = s.strip_suffix("spec").unwrap_or(s);
+        s.to_string()
+    }
+
+    fn index_path_lookup_entries(&mut self, path: &Path) {
+        let p_buf = path.to_path_buf();
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let lower_stem = stem.to_lowercase();
+            if !lower_stem.is_empty() {
+                let list = self.stem_index.entry(lower_stem.clone()).or_default();
+                if !list.contains(&p_buf) {
+                    list.push(p_buf.clone());
+                }
+            }
+
+            if Self::is_test_file(path) {
+                let core = Self::extract_core_test_stem(&lower_stem);
+                if !core.is_empty() {
+                    let list = self.test_by_stem.entry(core).or_default();
+                    if !list.contains(&p_buf) {
+                        list.push(p_buf.clone());
+                    }
+                }
+            }
+        }
+
+        // Add 1-segment, 2-segment, and 3-segment suffixes
+        let comps: Vec<String> = path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let n = comps.len();
+        for depth in 1..=3.min(n) {
+            let suffix = comps[n - depth..].join("/");
+            let lower_suffix = suffix.to_lowercase();
+
+            let list = self.suffix_index.entry(suffix.clone()).or_default();
+            if !list.contains(&p_buf) {
+                list.push(p_buf.clone());
+            }
+
+            if lower_suffix != suffix {
+                let list_lower = self.suffix_index.entry(lower_suffix).or_default();
+                if !list_lower.contains(&p_buf) {
+                    list_lower.push(p_buf.clone());
+                }
+            }
+        }
+
+        for parent in path.ancestors().skip(1) {
+            if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+                let lower = name.to_lowercase();
+                if !lower.is_empty() {
+                    let list = self.dir_index.entry(lower).or_default();
+                    if !list.contains(&p_buf) {
+                        list.push(p_buf.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn unindex_path_lookup_entries(&mut self, path: &Path) {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let lower_stem = stem.to_lowercase();
+            if let Some(list) = self.stem_index.get_mut(&lower_stem) {
+                list.retain(|p| p != path);
+            }
+            if Self::is_test_file(path) {
+                let core = Self::extract_core_test_stem(&lower_stem);
+                if let Some(list) = self.test_by_stem.get_mut(&core) {
+                    list.retain(|p| p != path);
+                }
+            }
+        }
+
+        let comps: Vec<String> = path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let n = comps.len();
+        for depth in 1..=3.min(n) {
+            let suffix = comps[n - depth..].join("/");
+            let lower_suffix = suffix.to_lowercase();
+            if let Some(list) = self.suffix_index.get_mut(&suffix) {
+                list.retain(|p| p != path);
+            }
+            if let Some(list) = self.suffix_index.get_mut(&lower_suffix) {
+                list.retain(|p| p != path);
+            }
+        }
+
+        for parent in path.ancestors().skip(1) {
+            if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+                let lower = name.to_lowercase();
+                if let Some(list) = self.dir_index.get_mut(&lower) {
+                    list.retain(|p| p != path);
+                }
+            }
+        }
     }
 
     /// Check whether a path represents a test file based on conventions across languages
@@ -263,76 +407,51 @@ impl VectorGraph {
             }
         }
 
-        // 1. Embed full file representation (bounded preview)
-        if rebuild_edges {
-            let file_header = format!(
-                "File: {}\nSymbols: {}\n\n{}",
-                path.display(),
-                file.symbols
-                    .iter()
-                    .take(30)
-                    .map(|s| format!("{} {}", s.kind, s.name))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                safe_truncate_str(&file.content, 2048)
-            );
-            file.vector = self.embedder.embed(&file_header);
-        }
+        // 1. Keep file vector empty for fast bulk indexing (computed on-demand when semantic vector search is queried)
+        file.vector = Vec::new();
 
         // 2. Remove any previous chunks for this file
         self.chunks.retain(|c| c.file_path != path);
 
-        // 3. Create symbol-level chunks (skip during bulk loads to eliminate CPU overhead)
-        if rebuild_edges {
-            let lines: Vec<&str> = file.content.lines().collect();
+        // 3. Create symbol-level chunks without eager embedding calculation
+        let lines: Vec<&str> = file.content.lines().collect();
 
-            for symbol in &file.symbols {
-                let start = symbol.start_line.saturating_sub(1);
-                let end = symbol.end_line.min(lines.len());
-                let symbol_snippet = if start < lines.len() && start < end {
-                    lines[start..end].join("\n")
-                } else {
-                    symbol.signature.clone()
-                };
+        for symbol in &file.symbols {
+            let start = symbol.start_line.saturating_sub(1);
+            let end = symbol.end_line.min(lines.len());
+            let symbol_snippet = if start < lines.len() && start < end {
+                lines[start..end].join("\n")
+            } else {
+                symbol.signature.clone()
+            };
 
-                let symbol_embed_text = format!(
-                    "File: {}\nSymbol: {} {}\nDoc: {}\nCode:\n{}",
-                    path.display(),
-                    symbol.kind,
-                    symbol.name,
-                    symbol.doc_comment.as_deref().unwrap_or(""),
-                    symbol_snippet
-                );
-                let vector = self.embedder.embed(&symbol_embed_text);
-
-                self.chunks.push(FileChunk {
-                    id: format!("{}:{}", path.display(), symbol.name),
-                    file_path: path.clone(),
-                    start_line: symbol.start_line,
-                    end_line: symbol.end_line,
-                    content: symbol_snippet,
-                    symbol_name: Some(symbol.name.clone()),
-                    vector,
-                });
-            }
-
-            // Also add whole-file chunk
-            let max_preview = lines
-                .iter()
-                .take(50)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n");
             self.chunks.push(FileChunk {
-                id: format!("{}:file", path.display()),
+                id: format!("{}:{}", path.display(), symbol.name),
                 file_path: path.clone(),
-                start_line: 1,
-                end_line: lines.len().max(1),
-                content: max_preview,
-                symbol_name: None,
-                vector: file.vector.clone(),
+                start_line: symbol.start_line,
+                end_line: symbol.end_line,
+                content: symbol_snippet,
+                symbol_name: Some(symbol.name.clone()),
+                vector: Vec::new(),
             });
         }
+
+        // Also add whole-file chunk
+        let max_preview = lines
+            .iter()
+            .take(50)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.chunks.push(FileChunk {
+            id: format!("{}:file", path.display()),
+            file_path: path.clone(),
+            start_line: 1,
+            end_line: lines.len().max(1),
+            content: max_preview,
+            symbol_name: None,
+            vector: Vec::new(),
+        });
 
         // 4. Update graph node
         let node_idx = match self.node_indices.get(&path) {
@@ -368,6 +487,7 @@ impl VectorGraph {
             self.history.record_initial(&path, &file.content);
         }
 
+        self.index_path_lookup_entries(&path);
         self.files.insert(path, file);
         if rebuild_edges {
             self.rebuild_edges_for_node(node_idx);
@@ -376,6 +496,7 @@ impl VectorGraph {
 
     /// Remove a file from vector index and graph, recording a deletion event in history cache
     pub fn remove_file(&mut self, path: &Path) {
+        self.unindex_path_lookup_entries(path);
         let old_node = self.files.remove(path);
         let old_content = old_node.as_ref().map(|n| n.content.clone());
         let old_symbols: Vec<String> = old_node
@@ -551,22 +672,11 @@ impl VectorGraph {
         }
     }
 
-    /// Rebuild all dependency edges across the entire graph
+    /// Rebuild all dependency edges across the entire graph using O(1) index tables
     pub fn rebuild_all_edges(&mut self) {
-        let known_files: HashSet<PathBuf> = self.files.keys().cloned().collect();
-        let mut filename_index: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        for path in self.files.keys() {
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                filename_index
-                    .entry(file_name.to_string())
-                    .or_default()
-                    .push(path.clone());
-            }
-        }
-
         let all_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
         for idx in all_indices {
-            self.rebuild_edges_for_node_indexed(idx, &known_files, &filename_index);
+            self.rebuild_edges_for_node(idx);
         }
     }
 
@@ -601,28 +711,8 @@ impl VectorGraph {
         }
     }
 
-    /// Rebuild import/dependency edges for a specific file node
-    fn rebuild_edges_for_node(&mut self, source_idx: NodeIndex) {
-        let known_files: HashSet<PathBuf> = self.files.keys().cloned().collect();
-        let mut filename_index: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        for path in self.files.keys() {
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                filename_index
-                    .entry(file_name.to_string())
-                    .or_default()
-                    .push(path.clone());
-            }
-        }
-        self.rebuild_edges_for_node_indexed(source_idx, &known_files, &filename_index);
-    }
-
-    fn rebuild_edges_for_node_indexed(
-        &mut self,
-        source_idx: NodeIndex,
-        known_files: &HashSet<PathBuf>,
-        filename_index: &HashMap<String, Vec<PathBuf>>,
-    ) {
-        // Clear old outgoing edges from this node so stale imports are never retained
+    /// Rebuild import/dependency edges for a specific file node in O(1) time
+    pub fn rebuild_edges_for_node(&mut self, source_idx: NodeIndex) {
         let edges_to_remove: Vec<_> = self
             .graph
             .edges_directed(source_idx, petgraph::Direction::Outgoing)
@@ -637,74 +727,7 @@ impl VectorGraph {
             let imports = file_node.imports.clone();
 
             for import in imports {
-                let mut matched_target: Option<PathBuf> = None;
-
-                // 1. Try extracting string literal specifier for TS/JS
-                if let Some(caps) = IMPORT_PATH_REGEX.captures(&import)
-                    && let Some(spec) = caps.get(1)
-                {
-                    matched_target = resolve_module_import_path(
-                        &source_path,
-                        spec.as_str(),
-                        known_files,
-                        &self.path_aliases,
-                    );
-                }
-
-                // 2. Try Rust module resolution
-                if matched_target.is_none()
-                    && source_path.extension().and_then(|e| e.to_str()) == Some("rs")
-                {
-                    matched_target = resolve_rust_import_path(&source_path, &import, known_files);
-                }
-
-                // 3. Try Python import resolution
-                if matched_target.is_none()
-                    && matches!(
-                        source_path.extension().and_then(|e| e.to_str()),
-                        Some("py" | "pyi" | "pyw")
-                    )
-                {
-                    matched_target = resolve_python_import_path(&source_path, &import, known_files);
-                }
-
-                // 4. Try C/C++ include resolution
-                if matched_target.is_none()
-                    && matches!(
-                        source_path.extension().and_then(|e| e.to_str()),
-                        Some("c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hxx")
-                    )
-                {
-                    matched_target = resolve_cpp_include_path(&source_path, &import, known_files);
-                }
-
-                // 5. Try Go package import resolution
-                if matched_target.is_none()
-                    && source_path.extension().and_then(|e| e.to_str()) == Some("go")
-                {
-                    matched_target = resolve_go_import_path(&source_path, &import, known_files);
-                }
-
-                // 6. Try Java import resolution
-                if matched_target.is_none()
-                    && source_path.extension().and_then(|e| e.to_str()) == Some("java")
-                {
-                    matched_target = resolve_java_import_path(
-                        &source_path,
-                        &import,
-                        known_files,
-                        Some(filename_index),
-                    );
-                }
-
-                // 7. Try C# using resolution
-                if matched_target.is_none()
-                    && source_path.extension().and_then(|e| e.to_str()) == Some("cs")
-                {
-                    matched_target = resolve_csharp_import_path(&source_path, &import, known_files);
-                }
-
-                // 8. Connect edge if target matched
+                let matched_target = self.resolve_import(&source_path, &import);
                 if let Some(ref target) = matched_target
                     && let Some(&target_idx) = self.node_indices.get(target)
                     && target_idx != source_idx
@@ -715,44 +738,259 @@ impl VectorGraph {
         }
     }
 
-    /// Semantic and hybrid vector search across all codebase chunks
+    pub fn rebuild_edges_for_node_indexed(
+        &mut self,
+        source_idx: NodeIndex,
+        _known_files: &HashSet<PathBuf>,
+        _filename_index: &HashMap<String, Vec<PathBuf>>,
+    ) {
+        self.rebuild_edges_for_node(source_idx);
+    }
+
+    /// O(1) import resolution across all supported languages using suffix and stem hash tables
+    pub fn resolve_import(&self, source_path: &Path, import: &str) -> Option<PathBuf> {
+        let ext = source_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        // 1. TypeScript / JavaScript / CSS imports
+        if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
+            && let Some(caps) = IMPORT_PATH_REGEX.captures(import)
+            && let Some(spec) = caps.get(1)
+        {
+            let spec_str = spec.as_str().trim();
+            let mut resolved_base: Option<PathBuf> = None;
+
+            for (alias_key, target_prefix) in &self.path_aliases {
+                let key_clean = alias_key.trim_end_matches('*');
+                let target_clean = target_prefix.trim_end_matches('*');
+                if let Some(remainder) = spec_str.strip_prefix(key_clean) {
+                    let joined = format!("{}{}", target_clean, remainder);
+                    resolved_base = Some(normalize_relative_path(Path::new(&joined)));
+                    break;
+                }
+            }
+
+            if resolved_base.is_none() {
+                if spec_str.starts_with("./") || spec_str.starts_with("../") {
+                    let parent = source_path.parent().unwrap_or(Path::new(""));
+                    resolved_base = Some(normalize_relative_path(&parent.join(spec_str)));
+                } else {
+                    resolved_base = Some(normalize_relative_path(Path::new(spec_str)));
+                }
+            }
+
+            if let Some(base) = resolved_base {
+                let candidates = [
+                    base.clone(),
+                    base.with_extension("ts"),
+                    base.with_extension("tsx"),
+                    base.with_extension("js"),
+                    base.with_extension("jsx"),
+                    base.join("index.ts"),
+                    base.join("index.tsx"),
+                    base.join("index.js"),
+                ];
+                for cand in &candidates {
+                    if self.files.contains_key(cand) {
+                        return Some(cand.clone());
+                    }
+                }
+            }
+        }
+
+        // 2. Java imports
+        if ext == "java" {
+            let trimmed = import.trim();
+            if let Some(rest) = trimmed.strip_prefix("import ") {
+                let rest = rest.strip_prefix("static ").unwrap_or(rest).trim();
+                let clean = rest.trim_end_matches(';').trim();
+                if !clean.is_empty() {
+                    if let Some(pkg) = clean.strip_suffix(".*") {
+                        let last_pkg = pkg.split('.').next_back().unwrap_or("").to_lowercase();
+                        if let Some(matches) = self.stem_index.get(&last_pkg) {
+                            return matches.first().cloned();
+                        }
+                    } else {
+                        let class_name = clean.split('.').next_back().unwrap_or("");
+                        let filename = format!("{}.java", class_name);
+                        if let Some(matches) = self.suffix_index.get(&filename) {
+                            // If multiple, try matching package path
+                            let rel_hint = clean.replace('.', "/");
+                            for p in matches {
+                                if p.to_string_lossy().contains(&rel_hint) {
+                                    return Some(p.clone());
+                                }
+                            }
+                            return matches.first().cloned();
+                        }
+                        if let Some(matches) = self.stem_index.get(&class_name.to_lowercase()) {
+                            return matches.first().cloned();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Rust module imports
+        if ext == "rs" {
+            let trimmed = import.trim();
+            let clean = trimmed.strip_prefix("pub ").unwrap_or(trimmed).trim();
+            let clean = clean.strip_prefix("use ").unwrap_or(clean).trim();
+            let clean = clean.strip_prefix("crate::").unwrap_or(clean);
+            let parts: Vec<&str> = clean.split("::").filter(|s| !s.is_empty()).collect();
+            if let Some(&first) = parts.first() {
+                let joined = parts.join("/");
+                let candidates = [
+                    PathBuf::from(format!("src/{}.rs", first)),
+                    PathBuf::from(format!("src/{}/mod.rs", first)),
+                    PathBuf::from(format!("src/{}.rs", joined)),
+                    PathBuf::from(format!("src/{}/mod.rs", joined)),
+                ];
+                for cand in &candidates {
+                    if self.files.contains_key(cand) {
+                        return Some(cand.clone());
+                    }
+                }
+                if let Some(matches) = self.stem_index.get(&first.to_lowercase()) {
+                    return matches.first().cloned();
+                }
+            }
+        }
+
+        // 4. Python imports
+        if matches!(ext, "py" | "pyi" | "pyw") {
+            let trimmed = import.trim();
+            let clean = if let Some(stripped) = trimmed.strip_prefix("from ") {
+                stripped.split(" import ").next().unwrap_or(stripped).trim()
+            } else {
+                trimmed.strip_prefix("import ").unwrap_or(trimmed).trim()
+            };
+            let rel = clean.replace('.', "/");
+            let candidates = [
+                PathBuf::from(format!("{}.py", rel)),
+                PathBuf::from(format!("{}/__init__.py", rel)),
+            ];
+            for cand in &candidates {
+                if self.files.contains_key(cand) {
+                    return Some(cand.clone());
+                }
+            }
+            let last_token = clean.split('.').next_back().unwrap_or("");
+            if let Some(matches) = self.stem_index.get(&last_token.to_lowercase()) {
+                return matches.first().cloned();
+            }
+        }
+
+        // 5. C# imports
+        if ext == "cs" {
+            let trimmed = import.trim();
+            if let Some(rest) = trimmed.strip_prefix("using ") {
+                let rest = rest.strip_prefix("static ").unwrap_or(rest).trim();
+                let clean = rest.trim_end_matches(';').trim();
+                let ns = if let Some((_alias, target)) = clean.split_once('=') {
+                    target.trim()
+                } else {
+                    clean
+                };
+                let parts: Vec<&str> = ns.split('.').filter(|s| !s.is_empty()).collect();
+                if let Some(&last_token) = parts.last() {
+                    let filename = format!("{}.cs", last_token);
+                    if let Some(matches) = self.suffix_index.get(&filename) {
+                        return matches.first().cloned();
+                    }
+                    if let Some(matches) = self.stem_index.get(&last_token.to_lowercase()) {
+                        return matches.first().cloned();
+                    }
+                    if let Some(matches) = self.dir_index.get(&last_token.to_lowercase())
+                        && let Some(cs_file) = matches
+                            .iter()
+                            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("cs"))
+                    {
+                        return Some(cs_file.clone());
+                    }
+                }
+            }
+        }
+
+        // 6. Go package imports
+        if ext == "go"
+            && let Some(caps) = IMPORT_PATH_REGEX.captures(import)
+            && let Some(spec) = caps.get(1)
+        {
+            let last_pkg = spec.as_str().split('/').next_back().unwrap_or("");
+            if let Some(matches) = self.stem_index.get(&last_pkg.to_lowercase()) {
+                return matches.first().cloned();
+            }
+        }
+
+        // 7. C/C++ includes
+        if matches!(ext, "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hxx")
+            && let Some(caps) = IMPORT_PATH_REGEX.captures(import)
+            && let Some(spec) = caps.get(1)
+        {
+            let header = spec.as_str().trim();
+            if let Some(matches) = self.suffix_index.get(header) {
+                return matches.first().cloned();
+            }
+        }
+
+        None
+    }
+
+    /// Semantic and hybrid vector search with on-demand lazy vector embedding (max 64 candidates)
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         if query.trim().is_empty() || self.chunks.is_empty() {
             return Vec::new();
         }
 
-        let query_vec = self.embedder.embed(query);
         let query_lower = query.to_lowercase();
         let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
 
-        let mut scored: Vec<SearchHit> = self
+        // 1. Fast lexical shortlisting (top 64 candidates) to avoid computing 50,000 dense vectors
+        let mut candidates: Vec<(&FileChunk, f32)> = self
             .chunks
             .iter()
             .map(|chunk| {
-                let cos_sim = VectorEmbedder::cosine_similarity(&query_vec, &chunk.vector);
-
-                // Exact token boost for high precision
-                let mut boost = 0.0f32;
+                let mut score = 0.0f32;
                 let chunk_lower = chunk.content.to_lowercase();
                 if let Some(sym) = &chunk.symbol_name {
                     let sym_lower = sym.to_lowercase();
                     if sym_lower == query_lower {
-                        boost += 0.5;
+                        score += 3.0;
                     } else if sym_lower.contains(&query_lower) {
-                        boost += 0.3;
+                        score += 1.5;
                     }
                 }
 
                 for term in &query_terms {
                     if chunk_lower.contains(term) {
-                        boost += 0.05;
+                        score += 0.5;
                     }
                 }
 
-                let final_score = cos_sim + boost;
+                (chunk, score)
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(64);
+
+        // 2. Compute embeddings on-demand only for shortlisted candidates
+        let query_vec = self.embedder.embed(query);
+        let mut scored: Vec<SearchHit> = candidates
+            .into_iter()
+            .map(|(chunk, lex_boost)| {
+                let chunk_vec = if chunk.vector.is_empty() {
+                    self.embedder.embed(&chunk.content)
+                } else {
+                    chunk.vector.clone()
+                };
+                let cos_sim = VectorEmbedder::cosine_similarity(&query_vec, &chunk_vec);
                 SearchHit {
                     file_path: chunk.file_path.clone(),
-                    score: final_score,
+                    score: cos_sim + lex_boost,
                     symbol_name: chunk.symbol_name.clone(),
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,
@@ -761,7 +999,6 @@ impl VectorGraph {
             })
             .collect();
 
-        // Sort descending by score
         scored.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)

@@ -301,14 +301,33 @@ impl ContextCompiler {
         options: &TaskContextOptions,
     ) -> TaskContextPacket {
         let start_time = std::time::Instant::now();
+        let deadline = start_time + std::time::Duration::from_millis(450);
         let query_tokens = subtokenize_identifier(task);
         let task_lower = task.to_lowercase();
+        let target_path_opt = options.target_path.as_deref();
 
-        // 1. Build typed SymbolBlocks from all indexed files
+        let mut clean_query_words: Vec<String> = query_tokens
+            .iter()
+            .map(|s| s.to_lowercase())
+            .filter(|s| s.len() >= 2)
+            .collect();
+        for w in task_lower.split(|c: char| !c.is_alphanumeric()) {
+            let wl = w.to_lowercase();
+            if wl.len() >= 3 && !clean_query_words.contains(&wl) {
+                clean_query_words.push(wl);
+            }
+        }
+
+        // 1. Build typed SymbolBlocks from candidate files and symbols
         let mut blocks: Vec<SymbolBlock> = Vec::new();
         let mut total_symbols = 0usize;
 
         for (path, node) in &graph.files {
+            total_symbols += node.symbols.len();
+            let path_str_lower = path.to_string_lossy().to_lowercase();
+            let path_matches_target = target_path_opt.is_some_and(|tp| path.starts_with(tp));
+            let path_matches_query = clean_query_words.iter().any(|q| path_str_lower.contains(q));
+
             let ext = node.extension.as_deref().unwrap_or("");
             let lang_str = ext.to_string();
             let is_tree_sitter = matches!(
@@ -338,7 +357,21 @@ impl ContextCompiler {
             };
 
             for sym in &node.symbols {
-                total_symbols += 1;
+                if !path_matches_target && !path_matches_query {
+                    let name_lower = sym.name.to_lowercase();
+                    let matches = clean_query_words.iter().any(|q| {
+                        name_lower.contains(q)
+                            || sym.signature.to_lowercase().contains(q)
+                            || sym
+                                .doc_comment
+                                .as_deref()
+                                .is_some_and(|d| d.to_lowercase().contains(q))
+                    });
+                    if !matches && !task_lower.contains(&name_lower) {
+                        continue;
+                    }
+                }
+
                 let normalized_tokens = subtokenize_identifier(&sym.name);
                 let qualified_name = format!("{}:{}", path.display(), sym.name);
 
@@ -385,7 +418,7 @@ impl ContextCompiler {
                 directive: Some("HOLOGRAM_EMPTY: No indexed code blocks available.".to_string()),
                 diagnostics: Some(TaskContextDiagnostics {
                     total_indexed_files: graph.files.len(),
-                    total_indexed_symbols: 0,
+                    total_indexed_symbols: total_symbols,
                     matched_query_tokens: query_tokens,
                     graph_expansion_applied: false,
                     test_discovery_applied: false,
@@ -397,7 +430,7 @@ impl ContextCompiler {
             };
         }
 
-        let n_docs = blocks.len().max(1);
+        let n_docs = total_symbols.max(blocks.len()).max(1);
 
         // 2. Pre-calculate field lengths and average field lengths for BM25F
         // Fields: name (w=6.0, b=0.75), path (w=3.5, b=0.50), sig (w=2.5, b=0.60), body (w=1.0, b=0.80)
@@ -450,10 +483,10 @@ impl ContextCompiler {
             });
         }
 
-        let avg_len_name = (total_len_name as f64 / n_docs as f64).max(1.0);
-        let avg_len_path = (total_len_path as f64 / n_docs as f64).max(1.0);
-        let avg_len_sig = (total_len_sig as f64 / n_docs as f64).max(1.0);
-        let avg_len_body = (total_len_body as f64 / n_docs as f64).max(1.0);
+        let avg_len_name = (total_len_name as f64 / blocks.len() as f64).max(1.0);
+        let avg_len_path = (total_len_path as f64 / blocks.len() as f64).max(1.0);
+        let avg_len_sig = (total_len_sig as f64 / blocks.len() as f64).max(1.0);
+        let avg_len_body = (total_len_body as f64 / blocks.len() as f64).max(1.0);
 
         // 3. Compute document frequency df(q) and positive IDF
         let mut doc_freq: HashMap<String, usize> = HashMap::new();
@@ -652,18 +685,21 @@ impl ContextCompiler {
                             continue;
                         }
                         let dependents = graph.get_downstream_dependents(file);
+                        let dependencies = graph.get_dependencies(file);
                         let mut neighbors = dependents;
+                        neighbors.extend(dependencies);
+
                         if let Some(node) = graph.files.get(file) {
                             for imp in &node.imports {
-                                for target in graph.files.keys() {
-                                    if imp.contains(
-                                        &target
-                                            .file_stem()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .to_string(),
-                                    ) {
-                                        neighbors.push(target.clone());
+                                for token in subtokenize_identifier(imp) {
+                                    if let Some(targets) =
+                                        graph.stem_index.get(&token.to_lowercase())
+                                    {
+                                        for target in targets {
+                                            if target != file && !neighbors.contains(target) {
+                                                neighbors.push(target.clone());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -688,29 +724,33 @@ impl ContextCompiler {
                     pt = next_p;
                 }
 
-                // 6. Companion-test discovery (Configurable)
+                // 6. Companion-test discovery (O(1) test_by_stem and stem_index lookups)
                 if options.enable_test_discovery {
                     let mut test_boosts = HashMap::new();
                     for (file, &score) in &pt {
-                        let stem = file.file_stem().unwrap_or_default().to_string_lossy();
-                        for other in graph.files.keys() {
-                            if other == file {
-                                continue;
-                            }
-                            let other_str = other.to_string_lossy();
-                            let is_companion = (VectorGraph::is_test_file(other)
-                                && other_str.contains(stem.as_ref()))
-                                || (VectorGraph::is_test_file(file)
-                                    && stem.contains(
-                                        &other
-                                            .file_stem()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .to_string(),
-                                    ));
-                            if is_companion {
-                                *test_boosts.entry(other.clone()).or_insert(0.0) += score * 0.30;
-                                test_discovery_applied = true;
+                        if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
+                            let lower_stem = stem.to_lowercase();
+                            if VectorGraph::is_test_file(file) {
+                                let core = VectorGraph::extract_core_test_stem(&lower_stem);
+                                if let Some(sources) = graph.stem_index.get(&core) {
+                                    for sf in sources {
+                                        if sf != file {
+                                            *test_boosts.entry(sf.clone()).or_insert(0.0) +=
+                                                score * 0.30;
+                                            test_discovery_applied = true;
+                                        }
+                                    }
+                                }
+                            } else {
+                                if let Some(tests) = graph.test_by_stem.get(&lower_stem) {
+                                    for tf in tests {
+                                        if tf != file {
+                                            *test_boosts.entry(tf.clone()).or_insert(0.0) +=
+                                                score * 0.30;
+                                            test_discovery_applied = true;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -780,6 +820,9 @@ impl ContextCompiler {
             .take(options.max_hot_slices)
             .enumerate()
         {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
             if let Some(file_node) = graph.files.get(&candidate.block.file_path) {
                 // Ensure no redundant overlapping spans:
                 // If this symbol is completely enclosed within an already inlined slice in the same file, skip emitting duplicate code
@@ -850,6 +893,9 @@ impl ContextCompiler {
         // 8. Warm spans: skeletal stubs for secondary symbols in hot files
         let mut warm_slices_count = 0usize;
         for hot_file in &hot_inlined_files {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
             if let Some(file_node) = graph.files.get(hot_file) {
                 for sym in &file_node.symbols {
                     let already_inlined = inlined_line_spans.iter().any(|(p, s, e)| {

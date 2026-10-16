@@ -107,9 +107,11 @@ impl CodebaseScanner {
             })
             .build();
 
+        let max_files = 10_000usize;
         let paths: Vec<PathBuf> = walker
             .filter_map(Result::ok)
             .filter(|e| e.path().is_file())
+            .take(max_files)
             .map(|e| e.into_path())
             .collect();
 
@@ -198,6 +200,90 @@ impl CodebaseScanner {
             vector: Vec::new(), // Populated by VectorGraph
         })
     }
+}
+
+/// Bounded on-demand seed scan that prioritizes files matching query hints
+/// and halts when max_files or max_duration is reached.
+pub fn fast_seed_scan(
+    root: &Path,
+    query_hints: &[&str],
+    max_files: usize,
+    max_duration: std::time::Duration,
+) -> Vec<FileNode> {
+    let start = std::time::Instant::now();
+    let scanner = CodebaseScanner::new(root);
+    let skip_docs = has_primary_code_outside_docs(root);
+
+    let walker = WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .filter_entry(move |entry| {
+            let name = entry.file_name().to_string_lossy();
+            if is_universal_ignored_dir(&name) {
+                return false;
+            }
+            if skip_docs
+                && entry.file_type().is_some_and(|ft| ft.is_dir())
+                && NON_CORE_DOC_DIRS.contains(&name.as_ref())
+            {
+                return false;
+            }
+            true
+        })
+        .build();
+
+    let clean_hints: Vec<String> = query_hints
+        .iter()
+        .flat_map(|h| h.split(|c: char| !c.is_alphanumeric()))
+        .filter(|s| s.len() >= 3)
+        .map(|s| s.to_lowercase())
+        .collect();
+
+    let mut priority_files = Vec::new();
+    let mut other_files = Vec::new();
+
+    for entry in walker.filter_map(Result::ok) {
+        if start.elapsed() >= max_duration {
+            break;
+        }
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !PRIMARY_CODE_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+            continue;
+        }
+
+        let p_str = p.to_string_lossy().to_lowercase();
+        let matches_hint = clean_hints.iter().any(|h| p_str.contains(h));
+
+        if matches_hint {
+            priority_files.push(p.to_path_buf());
+            if priority_files.len() >= max_files {
+                break;
+            }
+        } else if other_files.len() < max_files {
+            other_files.push(p.to_path_buf());
+        }
+    }
+
+    let mut selected = priority_files;
+    for f in other_files {
+        if selected.len() >= max_files {
+            break;
+        }
+        selected.push(f);
+    }
+
+    selected
+        .iter()
+        .take(max_files)
+        .filter_map(|p| scanner.scan_file(p))
+        .collect()
 }
 
 fn is_likely_binary_or_asset(path: &Path) -> bool {

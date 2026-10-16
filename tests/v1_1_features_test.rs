@@ -1406,3 +1406,143 @@ fn test_subtokenize_camel_and_snake_case_math() {
     assert!(t4.contains(&"lines".to_string()));
     assert!(t4.contains(&"get_lines".to_string()));
 }
+
+#[test]
+fn test_massive_repo_10k_symbols_no_hang_under_300ms() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // 1. StorageProxy.java
+    let sp_code = r#"package org.apache.cassandra.service;
+
+import java.util.concurrent.TimeUnit;
+import org.apache.cassandra.exceptions.ReadTimeoutException;
+
+public class StorageProxy {
+    private static final long DEFAULT_TIMEOUT_MS = 5000;
+
+    public static void readRepair(String key) throws ReadTimeoutException {
+        long start = System.currentTimeMillis();
+        // perform read repair logic
+    }
+
+    public static void mutateAtomically(String mutation) {
+        // atomic mutation implementation
+    }
+
+    public static void truncateBlocking(String keyspace, String table) {
+        // truncate implementation
+    }
+}
+"#;
+    let sp_dir = root.join("src/java/org/apache/cassandra/service");
+    fs::create_dir_all(&sp_dir).unwrap();
+    fs::write(sp_dir.join("StorageProxy.java"), sp_code).unwrap();
+
+    // 2. StorageProxyTest.java
+    let test_code = r#"package org.apache.cassandra.service;
+
+import org.junit.Test;
+
+public class StorageProxyTest {
+    @Test
+    public void testReadRepairTimeout() {
+        StorageProxy.readRepair("key1");
+    }
+}
+"#;
+    let test_dir = root.join("test/unit/org/apache/cassandra/service");
+    fs::create_dir_all(&test_dir).unwrap();
+    fs::write(test_dir.join("StorageProxyTest.java"), test_code).unwrap();
+
+    // 3. 998 distractor files with 10 symbols each = ~10,000 symbols
+    let distractor_dir = root.join("src/java/org/apache/cassandra/db");
+    fs::create_dir_all(&distractor_dir).unwrap();
+
+    for i in 0..998 {
+        let code = format!(
+            r#"package org.apache.cassandra.db;
+
+public class TableHandler{i} {{
+    public void methodA{i}() {{}}
+    public void methodB{i}() {{}}
+    public void methodC{i}() {{}}
+    public void methodD{i}() {{}}
+    public void methodE{i}() {{}}
+    public void methodF{i}() {{}}
+    public void methodG{i}() {{}}
+    public void methodH{i}() {{}}
+    public void methodI{i}() {{}}
+    public void methodJ{i}() {{}}
+}}
+"#
+        );
+        fs::write(distractor_dir.join(format!("TableHandler{i}.java")), code).unwrap();
+    }
+
+    // Measure sync_workspace (indexing 1,000 files & ~10,000 symbols)
+    let mut graph = VectorGraph::new();
+    let sync_start = std::time::Instant::now();
+    graph.sync_workspace(root);
+    let sync_duration = sync_start.elapsed();
+
+    assert_eq!(graph.files.len(), 1000);
+    assert!(
+        graph.chunks.len() >= 10000,
+        "Expected at least 10,000 symbols/chunks, got {}",
+        graph.chunks.len()
+    );
+    println!(
+        "Massive repo (1,000 files / {} symbols) sync completed in {:?}",
+        graph.chunks.len(),
+        sync_duration
+    );
+
+    // Measure prepare_task_context query latency
+    let query_start = std::time::Instant::now();
+    let packet = layer::context_compiler::ContextCompiler::compile_task_context(
+        &graph,
+        "StorageProxy read repair timeout",
+        None,
+        4000,
+    );
+    let query_duration = query_start.elapsed();
+    println!(
+        "prepare_task_context query completed in {:?}",
+        query_duration
+    );
+
+    // Assert query finishes within deadline (< 450ms)
+    assert!(
+        query_duration < std::time::Duration::from_millis(450),
+        "Query took too long on massive repo: {:?}",
+        query_duration
+    );
+
+    // Verify StorageProxy and companion test were retrieved
+    assert!(
+        packet
+            .relevant_files
+            .iter()
+            .any(|f| f.contains("StorageProxy.java")),
+        "Expected StorageProxy.java in relevant_files: {:?}",
+        packet.relevant_files
+    );
+    assert!(
+        packet
+            .relevant_files
+            .iter()
+            .any(|f| f.contains("StorageProxyTest.java")),
+        "Expected companion test StorageProxyTest.java in relevant_files: {:?}",
+        packet.relevant_files
+    );
+
+    // Verify source slices contain StorageProxy code
+    assert!(
+        packet
+            .code_slices
+            .iter()
+            .any(|s| s.file.contains("StorageProxy.java")),
+        "Expected code slice from StorageProxy.java"
+    );
+}
