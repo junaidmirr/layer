@@ -210,10 +210,14 @@ fn handle_rpc_method(
                             new_root.display()
                         );
                         *root = new_root.clone();
-                        if let Ok(mut g) = graph.lock() {
-                            g.clear();
-                            g.sync_workspace(&new_root);
-                        }
+                        let graph_clone = Arc::clone(graph);
+                        let root_clone = new_root.clone();
+                        std::thread::spawn(move || {
+                            if let Ok(mut g) = graph_clone.lock() {
+                                g.clear();
+                                g.sync_workspace(&root_clone);
+                            }
+                        });
                     }
                 } else if let Some(path_str) = p.get("rootPath").and_then(|u| u.as_str()) {
                     let new_root = PathBuf::from(path_str);
@@ -223,10 +227,14 @@ fn handle_rpc_method(
                             new_root.display()
                         );
                         *root = new_root.clone();
-                        if let Ok(mut g) = graph.lock() {
-                            g.clear();
-                            g.sync_workspace(&new_root);
-                        }
+                        let graph_clone = Arc::clone(graph);
+                        let root_clone = new_root.clone();
+                        std::thread::spawn(move || {
+                            if let Ok(mut g) = graph_clone.lock() {
+                                g.clear();
+                                g.sync_workspace(&root_clone);
+                            }
+                        });
                     }
                 }
             }
@@ -760,6 +768,44 @@ fn handle_rpc_method(
                             }
                         }
                     ]
+                }
+            });
+            send_json_line(writer, &resp)?;
+        }
+        "ping" => {
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {}
+            });
+            send_json_line(writer, &resp)?;
+        }
+        "resources/list" => {
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "resources": []
+                }
+            });
+            send_json_line(writer, &resp)?;
+        }
+        "resources/templates/list" => {
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "resourceTemplates": []
+                }
+            });
+            send_json_line(writer, &resp)?;
+        }
+        "prompts/list" => {
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "prompts": []
                 }
             });
             send_json_line(writer, &resp)?;

@@ -282,37 +282,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_mcp = matches!(cli.command, Some(Commands::Mcp));
     let quiet = cli.quiet || cli.json || is_mcp;
 
-    if !quiet {
-        println!(
-            "{} {}",
-            "⚡ Initializing Layer Context Engine for:".cyan().bold(),
-            root.display().to_string().yellow()
-        );
-    }
-
-    let start_time = std::time::Instant::now();
-    let scanner = CodebaseScanner::new(&root);
-    let mut vector_graph = VectorGraph::new();
-
-    let file_nodes = scanner.scan_all();
-    let file_count = file_nodes.len();
-
-    for node in file_nodes {
-        vector_graph.upsert_file(node);
-    }
-    let elapsed = start_time.elapsed();
-
-    if !quiet {
-        println!(
-            "{} Indexed {} files with {} vector chunks & AST nodes in {:.2?}.\n",
-            "✓".green().bold(),
-            file_count.to_string().green(),
-            vector_graph.chunks.len().to_string().green(),
-            elapsed
-        );
-    }
-
+    let vector_graph = VectorGraph::new();
     let graph_arc = Arc::new(Mutex::new(vector_graph));
+
+    if is_mcp {
+        // Fast MCP startup: background thread indexes workspace without blocking stdio handshake
+        let graph_bg = Arc::clone(&graph_arc);
+        let root_bg = root.clone();
+        std::thread::spawn(move || {
+            let scanner = CodebaseScanner::new(&root_bg);
+            let file_nodes = scanner.scan_all();
+            if let Ok(mut g) = graph_bg.lock() {
+                for node in file_nodes {
+                    g.upsert_file(node);
+                }
+            }
+        });
+    } else {
+        if !quiet {
+            println!(
+                "{} {}",
+                "⚡ Initializing Layer Context Engine for:".cyan().bold(),
+                root.display().to_string().yellow()
+            );
+        }
+
+        let start_time = std::time::Instant::now();
+        let scanner = CodebaseScanner::new(&root);
+
+        let file_nodes = scanner.scan_all();
+        let file_count = file_nodes.len();
+
+        {
+            let mut g = graph_arc.lock().unwrap();
+            for node in file_nodes {
+                g.upsert_file(node);
+            }
+        }
+        let elapsed = start_time.elapsed();
+
+        if !quiet {
+            println!(
+                "{} Indexed {} files with {} vector chunks & AST nodes in {:.2?}.\n",
+                "✓".green().bold(),
+                file_count.to_string().green(),
+                graph_arc.lock().unwrap().chunks.len().to_string().green(),
+                elapsed
+            );
+        }
+    }
 
     // Start background watcher for persistent modes (MCP, REPL, Watch)
     let is_persistent =
