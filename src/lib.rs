@@ -13,6 +13,7 @@ pub mod package_indexer;
 pub mod scaffold;
 pub mod scanner;
 pub mod telemetry;
+pub mod universal_parser;
 pub mod verifier;
 pub mod walker;
 pub mod watcher;

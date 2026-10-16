@@ -132,15 +132,31 @@ impl VectorGraph {
         file_name.contains(".test.")
             || file_name.contains(".spec.")
             || file_name.starts_with("test_")
+            || (file_name.starts_with("test")
+                && (file_name.ends_with(".java")
+                    || file_name.ends_with(".scala")
+                    || file_name.ends_with(".kt")
+                    || file_name.ends_with(".cs")))
+            || file_name.ends_with("test.java")
+            || file_name.ends_with("tests.java")
+            || file_name.ends_with("testcase.java")
+            || file_name.ends_with("spec.scala")
+            || file_name.ends_with("test.cs")
+            || file_name.ends_with("tests.cs")
             || file_name.ends_with("_test.py")
             || file_name.ends_with("_test.go")
             || file_name.ends_with("_test.rs")
             || file_name.ends_with("_test.cpp")
             || file_name.ends_with("_test.cc")
+            || file_name.ends_with("_test.rb")
+            || file_name.ends_with("_spec.rb")
+            || file_name.ends_with("test.php")
             || file_name.ends_with("tests.swift")
             || file_name.ends_with("test.kt")
             || p_str.contains("/__tests__/")
             || p_str.starts_with("__tests__/")
+            || p_str.contains("/src/test/")
+            || p_str.starts_with("src/test/")
             || (p_str.starts_with("tests/")
                 && path.extension().and_then(|e| e.to_str()) == Some("rs"))
             || (p_str.contains("/tests/")
@@ -649,8 +665,7 @@ impl VectorGraph {
                         Some("py" | "pyi" | "pyw")
                     )
                 {
-                    matched_target =
-                        resolve_python_import_path(&source_path, &import, known_files);
+                    matched_target = resolve_python_import_path(&source_path, &import, known_files);
                 }
 
                 // 4. Try C/C++ include resolution
@@ -686,17 +701,15 @@ impl VectorGraph {
                 if matched_target.is_none()
                     && source_path.extension().and_then(|e| e.to_str()) == Some("cs")
                 {
-                    matched_target =
-                        resolve_csharp_import_path(&source_path, &import, known_files);
+                    matched_target = resolve_csharp_import_path(&source_path, &import, known_files);
                 }
 
                 // 8. Connect edge if target matched
-                if let Some(ref target) = matched_target {
-                    if let Some(&target_idx) = self.node_indices.get(target)
-                        && target_idx != source_idx
-                    {
-                        self.graph.update_edge(source_idx, target_idx, ());
-                    }
+                if let Some(ref target) = matched_target
+                    && let Some(&target_idx) = self.node_indices.get(target)
+                    && target_idx != source_idx
+                {
+                    self.graph.update_edge(source_idx, target_idx, ());
                 }
             }
         }
@@ -2133,7 +2146,7 @@ pub fn resolve_java_import_path(
 
         // Fast filename index match
         let target_suffix = format!("{}.java", rel);
-        let class_filename = format!("{}.java", clean.split('.').last().unwrap_or(""));
+        let class_filename = format!("{}.java", clean.split('.').next_back().unwrap_or(""));
         if let Some(fn_idx) = filename_index {
             if let Some(matching_files) = fn_idx.get(&class_filename) {
                 for file in matching_files {

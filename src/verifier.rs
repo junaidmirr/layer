@@ -578,9 +578,30 @@ impl Verifier {
                         }
                     }
                 }
-            } else if matches!(ext, "swift" | "kt" | "kts" | "cs" | "java")
-                && let Err((line, col, msg)) =
-                    crate::scanner::AstScanner::check_lexical_syntax(&node.content)
+            } else if matches!(
+                ext,
+                "swift"
+                    | "kt"
+                    | "kts"
+                    | "cs"
+                    | "java"
+                    | "scala"
+                    | "php"
+                    | "rb"
+                    | "ex"
+                    | "exs"
+                    | "dart"
+                    | "zig"
+                    | "lua"
+                    | "sh"
+                    | "bash"
+                    | "sql"
+                    | "proto"
+                    | "graphql"
+                    | "gql"
+                    | "sol"
+            ) && let Err((line, col, msg)) =
+                crate::universal_parser::UniversalParser::check_syntax(&node.content, ext)
             {
                 items.push(DiagnosticItem {
                     file: rel_path.to_string_lossy().to_string(),

@@ -31,7 +31,8 @@ pub static NON_CORE_DOC_DIRS: &[&str] = &["docs_src", "site", "examples", "bench
 
 pub static PRIMARY_CODE_EXTENSIONS: &[&str] = &[
     "rs", "py", "pyi", "ts", "tsx", "js", "jsx", "go", "c", "cpp", "cc", "h", "hpp", "swift", "kt",
-    "kts", "cs", "java",
+    "kts", "cs", "java", "scala", "php", "rb", "ex", "exs", "dart", "zig", "lua", "sh", "bash",
+    "sql", "proto", "graphql", "gql", "tf", "hcl", "groovy", "gradle", "sol",
 ];
 
 pub fn is_universal_ignored_dir(name: &str) -> bool {

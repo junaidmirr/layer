@@ -1,16 +1,5 @@
 use crate::models::{Symbol, SymbolKind};
-use regex::Regex;
-use std::sync::LazyLock;
 use tree_sitter::{Language, Node, Parser};
-
-// Fallback regexes only for Tier-2 languages without dedicated compiled Tree-sitter grammars (e.g. Java, Kotlin, Swift, C#, PHP, Zig)
-static GENERIC_FN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*(?:(?:public|private|protected|internal|virtual|static|inline|explicit|constexpr|friend|async|override|final|pub|fn|func|def)\s+)+(?:[a-zA-Z_][a-zA-Z0-9_<>, \t*&:\[\]]*\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^;]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:final\s*)?(?:->\s*[^{]+)?\{").unwrap()
-});
-
-static GENERIC_CLASS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*(?:(?:public|private|protected|internal|abstract|final|sealed|open|data|pub)\s+)*(?:class|struct|interface|enum|trait)\s+([a-zA-Z0-9_]+)").unwrap()
-});
 
 /// Represents an AST-verified symbol reference / usage site in source code
 #[derive(Debug, Clone)]
@@ -62,23 +51,8 @@ impl AstScanner {
             return (symbols, imports);
         }
 
-        let lines: Vec<&str> = content.lines().collect();
-        if matches!(
-            ext.as_str(),
-            "java" | "kt" | "kts" | "swift" | "cs" | "php" | "scala" | "dart" | "zig"
-        ) {
-            Self::scan_fallback_oop(&lines, &mut symbols);
-        }
-        symbols.sort_by_key(|s| s.start_line);
-
-        for line in &lines {
-            let trimmed = line.trim();
-            if trimmed.starts_with("import ") || trimmed.starts_with("using ") {
-                imports.push(trimmed.trim_end_matches(';').to_string());
-            }
-        }
-
-        (symbols, imports)
+        // Delegate to UniversalParser (ULBA) for all polyglot languages
+        crate::universal_parser::UniversalParser::parse(content, &ext)
     }
 
     /// Extract symbols using Tree-sitter Concrete Syntax Trees (CST/AST),
@@ -930,74 +904,6 @@ impl AstScanner {
         }
         None
     }
-
-    fn scan_fallback_oop(lines: &[&str], symbols: &mut Vec<Symbol>) {
-        for (idx, &line) in lines.iter().enumerate() {
-            let line_num = idx + 1;
-            if let Some(caps) = GENERIC_CLASS_RE.captures(line)
-                && let Some(m) = caps.get(1)
-            {
-                let end_line = find_block_end(lines, idx);
-                let kind = if line.contains("struct ") {
-                    SymbolKind::Struct
-                } else if line.contains("interface ") {
-                    SymbolKind::Interface
-                } else if line.contains("enum ") {
-                    SymbolKind::Enum
-                } else {
-                    SymbolKind::Class
-                };
-                symbols.push(Symbol {
-                    name: m.as_str().to_string(),
-                    kind,
-                    start_line: line_num,
-                    end_line,
-                    signature: line.trim().to_string(),
-                    doc_comment: find_preceding_doc_comment(lines, idx),
-                });
-            } else if let Some(caps) = GENERIC_FN_RE.captures(line)
-                && let Some(m) = caps.get(1)
-            {
-                let name = m.as_str();
-                if !["if", "for", "while", "switch", "catch", "return", "sizeof"].contains(&name) {
-                    let end_line = find_block_end(lines, idx);
-                    symbols.push(Symbol {
-                        name: name.to_string(),
-                        kind: SymbolKind::Function,
-                        start_line: line_num,
-                        end_line,
-                        signature: line.trim().to_string(),
-                        doc_comment: find_preceding_doc_comment(lines, idx),
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn find_block_end(lines: &[&str], start_idx: usize) -> usize {
-    let mut brace_count = 0;
-    let mut found_open = false;
-
-    for (i, &line) in lines.iter().enumerate().skip(start_idx) {
-        for ch in line.chars() {
-            if ch == '{' {
-                brace_count += 1;
-                found_open = true;
-            } else if ch == '}' {
-                brace_count -= 1;
-                if found_open && brace_count <= 0 {
-                    return i + 1;
-                }
-            } else if ch == ';' && !found_open {
-                return i + 1;
-            }
-        }
-        if !found_open && i > start_idx + 4 {
-            return start_idx + 1;
-        }
-    }
-    start_idx + 1
 }
 
 fn find_preceding_doc_comment(lines: &[&str], start_idx: usize) -> Option<String> {

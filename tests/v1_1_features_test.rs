@@ -1126,3 +1126,283 @@ fn test_hard_capped_output_sizes_and_task_context() {
         packet.relevant_files.len()
     );
 }
+
+#[test]
+fn test_ulba_universal_polyglot_java_csharp_ruby_sql() {
+    // 1. Java extraction with braces inside strings and comments
+    let java_code = r#"package org.apache.hadoop.hdfs.server.federation.router;
+
+import java.io.IOException;
+import org.apache.hadoop.conf.Configuration;
+
+/**
+ * Router RPC Client.
+ */
+public class RouterRpcClient {
+    private final Configuration conf;
+
+    public RouterRpcClient(Configuration conf) {
+        this.conf = conf;
+        String s = "Literal with { braces } inside string"; // Line comment with { braces }
+    }
+
+    public Object invokeMethod(String method) throws IOException {
+        /* Multi-line comment
+           with { braces } inside
+        */
+        return null;
+    }
+}
+"#;
+    let (java_symbols, java_imports) =
+        layer::universal_parser::UniversalParser::parse(java_code, "java");
+    assert_eq!(java_imports.len(), 3);
+    assert!(
+        java_imports
+            .contains(&"package org.apache.hadoop.hdfs.server.federation.router".to_string())
+    );
+    assert!(java_imports.contains(&"import java.io.IOException".to_string()));
+
+    let class_sym = java_symbols
+        .iter()
+        .find(|s| s.name == "RouterRpcClient" && s.kind == layer::models::SymbolKind::Class);
+    assert!(
+        class_sym.is_some(),
+        "RouterRpcClient class must be extracted"
+    );
+    let class_sym = class_sym.unwrap();
+    assert_eq!(class_sym.start_line, 9);
+    assert_eq!(class_sym.end_line, 23);
+
+    let invoke_sym = java_symbols.iter().find(|s| s.name == "invokeMethod");
+    assert!(invoke_sym.is_some(), "invokeMethod must be extracted");
+    let invoke_sym = invoke_sym.unwrap();
+    assert_eq!(invoke_sym.start_line, 17);
+    assert_eq!(invoke_sym.end_line, 22);
+
+    // 2. C# class and interface
+    let cs_code = r#"using System;
+using System.Threading.Tasks;
+
+namespace Layer.Core;
+
+public interface IRouterClient {
+    Task<string> SendAsync(string payload);
+}
+
+public class RouterClient : IRouterClient {
+    public async Task<string> SendAsync(string payload) {
+        return await Task.FromResult(payload);
+    }
+}
+"#;
+    let (cs_symbols, cs_imports) = layer::universal_parser::UniversalParser::parse(cs_code, "cs");
+    assert_eq!(cs_imports.len(), 3);
+    assert!(cs_imports.contains(&"using System".to_string()));
+    assert!(cs_imports.contains(&"namespace Layer.Core".to_string()));
+
+    let iface_sym = cs_symbols
+        .iter()
+        .find(|s| s.name == "IRouterClient" && s.kind == layer::models::SymbolKind::Interface);
+    assert!(iface_sym.is_some(), "IRouterClient must be extracted");
+    assert_eq!(iface_sym.unwrap().start_line, 6);
+
+    let cs_class_sym = cs_symbols
+        .iter()
+        .find(|s| s.name == "RouterClient" && s.kind == layer::models::SymbolKind::Class);
+    assert!(
+        cs_class_sym.is_some(),
+        "RouterClient class must be extracted"
+    );
+    assert_eq!(cs_class_sym.unwrap().start_line, 10);
+    assert_eq!(cs_class_sym.unwrap().end_line, 14);
+
+    // 3. Ruby class and def blocks
+    let ruby_code = r#"class RouterConnection
+  def connect(host, port)
+    [host, port].each do |item|
+      puts item
+    end
+  end
+end
+"#;
+    let (rb_symbols, _) = layer::universal_parser::UniversalParser::parse(ruby_code, "rb");
+    let rb_class = rb_symbols
+        .iter()
+        .find(|s| s.name == "RouterConnection")
+        .unwrap();
+    assert_eq!(rb_class.start_line, 1);
+    assert_eq!(rb_class.end_line, 7);
+
+    let rb_method = rb_symbols.iter().find(|s| s.name == "connect").unwrap();
+    assert_eq!(rb_method.start_line, 2);
+    assert_eq!(rb_method.end_line, 6);
+
+    // 4. SQL DDL and routine
+    let sql_code = r#"CREATE TABLE router_endpoints (
+    endpoint_id VARCHAR(64) PRIMARY KEY,
+    url TEXT NOT NULL
+);
+
+CREATE OR REPLACE PROCEDURE flush_endpoints() AS $$
+BEGIN
+    DELETE FROM router_endpoints;
+END;
+$$ LANGUAGE plpgsql;
+"#;
+    let (sql_symbols, _) = layer::universal_parser::UniversalParser::parse(sql_code, "sql");
+    let table_sym = sql_symbols
+        .iter()
+        .find(|s| s.name == "router_endpoints")
+        .unwrap();
+    assert_eq!(table_sym.start_line, 1);
+    assert_eq!(table_sym.end_line, 4);
+
+    let proc_sym = sql_symbols
+        .iter()
+        .find(|s| s.name == "flush_endpoints")
+        .unwrap();
+    assert_eq!(proc_sym.start_line, 6);
+    assert_eq!(proc_sym.end_line, 10);
+}
+
+#[test]
+fn test_hacs_bm25f_ppr_and_holographic_slicing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut graph = VectorGraph::new();
+
+    // 1. Create RouterRpcClient.java
+    let router_code = r#"package org.apache.hadoop.hdfs.server.federation.router;
+
+import java.io.IOException;
+
+public class RouterRpcClient {
+    private int timeoutMs = 5000;
+
+    public void setTimeout(int ms) {
+        this.timeoutMs = ms;
+    }
+
+    public Object invokeMethod(String method) throws IOException {
+        if (timeoutMs <= 0) {
+            throw new IOException("Timeout occurred in router rpc client");
+        }
+        return "result";
+    }
+}
+"#;
+    fs::create_dir_all(root.join("src/main/java/org/apache/hadoop")).unwrap();
+    fs::write(
+        root.join("src/main/java/org/apache/hadoop/RouterRpcClient.java"),
+        router_code,
+    )
+    .unwrap();
+
+    // 2. Create TestRouterRpcClient.java
+    let test_code = r#"package org.apache.hadoop.hdfs.server.federation.router;
+
+import org.junit.Test;
+
+public class TestRouterRpcClient {
+    @Test
+    public void testRouterRpcClientTimeout() {
+        RouterRpcClient client = new RouterRpcClient();
+        client.setTimeout(100);
+    }
+}
+"#;
+    fs::create_dir_all(root.join("src/test/java/org/apache/hadoop")).unwrap();
+    fs::write(
+        root.join("src/test/java/org/apache/hadoop/TestRouterRpcClient.java"),
+        test_code,
+    )
+    .unwrap();
+
+    graph.sync_workspace(root);
+
+    // 3. Query via HACS ContextCompiler
+    let packet = layer::context_compiler::ContextCompiler::compile_task_context(
+        &graph,
+        "fix router rpc client timeout issue in invokeMethod",
+        None,
+        4000,
+    );
+
+    // Verify top ranked file and companion test file boost
+    assert!(!packet.relevant_files.is_empty());
+    assert!(
+        packet.relevant_files[0].contains("RouterRpcClient.java"),
+        "Top relevant file must be RouterRpcClient.java, got: {:?}",
+        packet.relevant_files
+    );
+    assert!(
+        packet
+            .relevant_files
+            .iter()
+            .any(|f| f.contains("TestRouterRpcClient.java")),
+        "Test companion TestRouterRpcClient.java must be included via PPR pairing boost"
+    );
+
+    // Verify Hologram has exact line numbers and code slices
+    assert!(!packet.hologram.is_empty(), "Hologram must be generated");
+    assert!(
+        packet
+            .hologram
+            .contains("L5: public class RouterRpcClient {")
+            || packet.hologram.contains("RouterRpcClient"),
+        "Hologram must contain inlined line numbers for RouterRpcClient"
+    );
+    assert!(
+        packet.hologram.len() <= 4800,
+        "Hologram must be within 4800-char budget"
+    );
+
+    // Verify structured code_slices
+    assert!(
+        !packet.code_slices.is_empty(),
+        "code_slices must not be empty"
+    );
+    let top_slice = &packet.code_slices[0];
+    assert!(top_slice.file.contains("RouterRpcClient.java"));
+    assert!(top_slice.start_line >= 1);
+    assert!(top_slice.end_line >= top_slice.start_line);
+    assert!(top_slice.code.contains("L"));
+
+    // Verify directive
+    let directive = packet.directive.as_deref().unwrap_or("");
+    assert!(
+        directive.contains("HOLOGRAM_READY"),
+        "Expected HOLOGRAM_READY directive, got: {}",
+        directive
+    );
+}
+
+#[test]
+fn test_subtokenize_camel_and_snake_case_math() {
+    use layer::context_compiler::subtokenize_identifier;
+
+    let t1 = subtokenize_identifier("RouterRpcClient");
+    assert!(t1.contains(&"router".to_string()));
+    assert!(t1.contains(&"rpc".to_string()));
+    assert!(t1.contains(&"client".to_string()));
+    assert!(t1.contains(&"routerrpcclient".to_string()));
+
+    let t2 = subtokenize_identifier("calculate_crc32_checksum");
+    assert!(t2.contains(&"calculate".to_string()));
+    assert!(t2.contains(&"crc".to_string()));
+    assert!(t2.contains(&"32".to_string()));
+    assert!(t2.contains(&"checksum".to_string()));
+    assert!(t2.contains(&"calculate_crc32_checksum".to_string()));
+
+    let t3 = subtokenize_identifier("XMLHTTPRequest");
+    assert!(t3.contains(&"xml".to_string()));
+    assert!(t3.contains(&"http".to_string()));
+    assert!(t3.contains(&"request".to_string()));
+    assert!(t3.contains(&"xmlhttprequest".to_string()));
+
+    let t4 = subtokenize_identifier("get_lines");
+    assert!(t4.contains(&"get".to_string()));
+    assert!(t4.contains(&"lines".to_string()));
+    assert!(t4.contains(&"get_lines".to_string()));
+}
