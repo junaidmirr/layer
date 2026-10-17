@@ -2,19 +2,29 @@
 
 <img src="https://i.ibb.co/yFFyLDcy/Layer-Smarter-Context-Faster-Agents-1.png" width="200" alt="Layer logo" />
 
-# Layer
+<h1>Layer</h1>
 
-**Smarter context for faster coding agents.**
+<p><strong>Smarter context for faster coding agents.</strong></p>
 
-A small, fast MCP server written in Rust that helps AI coding agents understand your codebase instead of guessing at it.
+<p>A small, fast MCP server written in Rust that helps AI coding agents understand your codebase instead of guessing at it.</p>
 
-[![CI](https://github.com/junaidmirr/layer/actions/workflows/ci.yml/badge.svg)](https://github.com/junaidmirr/layer/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
-[![Tree-sitter](https://img.shields.io/badge/Tree--sitter-Compiled%20Grammars-blueviolet.svg)](https://tree-sitter.github.io/tree-sitter/)
-[![MCP](https://img.shields.io/badge/MCP-23%20Tools%20%7C%2019%20CLI%20Commands-green.svg)](https://modelcontextprotocol.io)
+<p>
+  <a href="https://github.com/junaidmirr/layer/actions/workflows/ci.yml"><img src="https://github.com/junaidmirr/layer/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-2024%20edition-orange.svg" alt="Rust 2024 edition" /></a>
+  <a href="https://tree-sitter.github.io/tree-sitter/"><img src="https://img.shields.io/badge/Tree--sitter-Compiled%20Grammars-blueviolet.svg" alt="Tree-sitter compiled grammars" /></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-23%20Tools%20%7C%2019%20CLI%20Commands-green.svg" alt="MCP: 23 tools and 19 CLI commands" /></a>
+</p>
 
-[Why Layer](#why-layer) · [Benchmarks](#benchmarks) · [How it works](#how-it-works) · [Languages](#supported-languages) · [Tools](#tools) · [Install](#install) · [CLI](#cli-usage)
+<p>
+  <a href="#why-layer">Why Layer</a> ·
+  <a href="#benchmarks">Benchmarks</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#supported-languages">Languages</a> ·
+  <a href="#tools">Tools</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#cli-usage">CLI</a>
+</p>
 
 </div>
 
