@@ -1,3 +1,6 @@
+#![allow(unknown_lints)]
+#![allow(clippy::manual_pop_if)]
+
 use clap::{Parser, Subcommand};
 use colored::*;
 use layer::context_engine::ContextEngine;

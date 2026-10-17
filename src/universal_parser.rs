@@ -589,11 +589,11 @@ impl UniversalParser {
                             top.brace_depth_at_open = brace_depth;
                         }
                     } else if ch == '}' {
-                        if let Some(top) = block_stack.last()
-                            && (top.brace_depth_at_open == brace_depth
-                                || (top.brace_depth_at_open == 0 && brace_depth <= 1))
-                        {
-                            let closed = block_stack.pop().unwrap();
+                        let should_close = block_stack.last().is_some_and(|top| {
+                            top.brace_depth_at_open == brace_depth
+                                || (top.brace_depth_at_open == 0 && brace_depth <= 1)
+                        });
+                        if should_close && let Some(closed) = block_stack.pop() {
                             symbols.push(Symbol {
                                 name: closed.name,
                                 kind: closed.kind,

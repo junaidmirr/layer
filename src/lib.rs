@@ -1,4 +1,6 @@
 #![recursion_limit = "512"]
+#![allow(unknown_lints)]
+#![allow(clippy::manual_pop_if)]
 
 pub mod context_compiler;
 pub mod context_engine;
