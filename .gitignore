@@ -5,6 +5,9 @@
 .DS_Store
 Thumbs.db
 
+# Documentation site (separate repository)
+/layer-doc/
+
 # Editor configurations
 .vscode/
 .idea/
